@@ -57,11 +57,11 @@ export class IrcAction {
                 );
             case "video":
                 return new IrcAction(
-                    "emote", "" + matrixAction.text, matrixAction.ts
+                    "message", "" + matrixAction.text, matrixAction.ts
                 );
             case "file":
                 return new IrcAction(
-                    "emote", "" + matrixAction.text, matrixAction.ts
+                    "message", "" + matrixAction.text, matrixAction.ts
                 );
             case "topic":
                 if (matrixAction.text === null) {
