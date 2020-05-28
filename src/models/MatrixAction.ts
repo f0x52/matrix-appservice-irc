@@ -173,14 +173,14 @@ export class MatrixAction {
             }
             const isFile = ["m.image", "m.file", "m.video", "m.audio"].includes(event.content.msgtype);
             if (isFile && event.content.url) {
-                let fileSize = "";
-                if (event.content.info && event.content.info.size &&
-                        typeof event.content.info.size === "number") {
-                    fileSize = " (" + Math.round(event.content.info.size / 1024) + "KB)";
-                }
+                let mxc = event.content.url.slice(6);
+                let url = `https://u.pixie.town/${mxc}`;
 
-                const url = ContentRepo.getHttpUriForMxc(mediaUrl, event.content.url);
-                text = `${event.content.body}${fileSize} < ${url} >`;
+                let filename = "";
+                if (event.content.body) {
+                    filename = `/${event.content.body}`;
+                }
+                text = `${url}${filename}`;
             }
         }
         return new MatrixAction(type, text, htmlText, event.origin_server_ts);

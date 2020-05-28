@@ -53,14 +53,16 @@ export class IrcAction {
                 return new IrcAction(matrixAction.type, matrixAction.text, matrixAction.ts);
             case "image":
                 return new IrcAction(
-                    "emote", "uploaded an image: " + matrixAction.text, matrixAction.ts
+                    "message", "" + matrixAction.text, matrixAction.ts
                 );
             case "video":
                 return new IrcAction(
-                    "emote", "uploaded a video: " + matrixAction.text, matrixAction.ts
+                    "emote", "" + matrixAction.text, matrixAction.ts
                 );
             case "file":
-                return new IrcAction("emote", "posted a file: " + matrixAction.text, matrixAction.ts);
+                return new IrcAction(
+                    "emote", "" + matrixAction.text, matrixAction.ts
+                );
             case "topic":
                 if (matrixAction.text === null) {
                     break;
