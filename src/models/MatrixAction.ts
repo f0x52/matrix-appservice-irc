@@ -174,6 +174,7 @@ export class MatrixAction {
             const isFile = ["m.image", "m.file", "m.video", "m.audio"].includes(event.content.msgtype);
             if (isFile && event.content.url) {
                 let mxc = event.content.url.slice(6);
+                // TODO: take url from config
                 let url = `https://u.pixie.town/${mxc}`;
 
                 let filename = "";
