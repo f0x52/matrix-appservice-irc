@@ -1,4 +1,147 @@
- 0.17.1 (2020-05-06)
+0.20.1 (2020-08-17)
+========================
+
+*There were enough changes during the RC period to warrant a new release, so `0.20.0`  was dropped in favour of `0.20.1`.*
+
+Features
+--------
+
+- The quit debouncer has been rewritten to be more performant, dropping QUITs entirely until the bridge is able to cope with them. ([\#1091](https://github.com/matrix-org/matrix-appservice-irc/issues/1091))
+- Track connection state in metrics ([\#1110](https://github.com/matrix-org/matrix-appservice-irc/issues/1110))
+
+
+Bugfixes
+--------
+
+- Fix metrics worker dying and crashing after high load ([\#1109](https://github.com/matrix-org/matrix-appservice-irc/issues/1109))
+- Speed up operations on the publicity syncer for IRC -> Matrix ([\#1111](https://github.com/matrix-org/matrix-appservice-irc/issues/1111))
+- Fix issue where all irc bridged rooms would be marked as public ([\#1113](https://github.com/matrix-org/matrix-appservice-irc/issues/1113))
+- Allow nicknames to start with a special character or number according to RFC 2812 § 2.3.1 ([\#1114](https://github.com/matrix-org/matrix-appservice-irc/issues/1114))
+
+
+Internal Changes
+----------------
+
+- Improve logging around ClientPool ([\#1112](https://github.com/matrix-org/matrix-appservice-irc/issues/1112))
+
+
+0.20.0-rc2 (2020-08-12)
+========================
+
+Features
+--------
+
+- Add metrics for tracking user activeness for matrix and irc users ([\#1105](https://github.com/matrix-org/matrix-appservice-irc/issues/1105))
+
+
+Bugfixes
+--------
+
+- Fix issue where /metrics would respond with no data ([\#1107](https://github.com/matrix-org/matrix-appservice-irc/issues/1107))
+
+
+0.20.0-rc1 (2020-08-11)
+========================
+
+Features
+--------
+
+- Media URLs now include the filename when sent to IRC. ([\#1087](https://github.com/matrix-org/matrix-appservice-irc/issues/1087))
+
+
+Bugfixes
+--------
+
+- Fix duplicate messages appearing if an IRC message is poorly decoded. ([\#1081](https://github.com/matrix-org/matrix-appservice-irc/issues/1081))
+- Make sure a killed BridgedClient is dead, even if connect was never called ([\#1098](https://github.com/matrix-org/matrix-appservice-irc/issues/1098))
+
+
+Internal Changes
+----------------
+
+- Enable many recommended ESLint rules to catch errors ([\#1078](https://github.com/matrix-org/matrix-appservice-irc/issues/1078))
+- Replace .indexOf with more specific methods ([\#1097](https://github.com/matrix-org/matrix-appservice-irc/issues/1097))
+
+
+0.19.0 (2020-07-06)
+====================
+
+No significant changes.
+
+
+0.19.0-rc2 (2020-06-29)
+========================
+
+Features
+--------
+
+- Add `bridge_app_version` metric to report the bridge version. ([\#1071](https://github.com/matrix-org/matrix-appservice-irc/issues/1071))
+
+
+Bugfixes
+--------
+
+- Fix issue where some metrics would not be reported,
+  and a bug in `inspectUsers` which would return an empty list. ([\#1075](https://github.com/matrix-org/matrix-appservice-irc/issues/1075))
+
+
+Internal Changes
+----------------
+
+- Refactor room creation code to use one function for tracking and creation of rooms ([\#1074](https://github.com/matrix-org/matrix-appservice-irc/issues/1074))
+- Code improvements: Simplify use of Map and RegEx methods ([\#1076](https://github.com/matrix-org/matrix-appservice-irc/issues/1076))
+
+
+0.19.0-rc1 (2020-06-26)
+========================
+
+**0.19 introduces a minimum reqirement of NodeJS 12.x**
+
+Features
+--------
+
+- Split out metrics endpoint to a seperate worker ([\#1069](https://github.com/matrix-org/matrix-appservice-irc/issues/1069))
+- Add ability to limit the number of kicked users, and order by inactive time when using the reapUsers Debug API command. ([\#1072](https://github.com/matrix-org/matrix-appservice-irc/issues/1072))
+
+
+Internal Changes
+----------------
+
+- **BREAKING CHANGE**: The bridge now requires a minimum of `NodeJS` v12.x ([\#1070](https://github.com/matrix-org/matrix-appservice-irc/issues/1070))
+
+
+0.18.0 (2020-06-26)
+====================
+
+No significant changes.
+
+
+0.18.0-rc1 (2020-06-22)
+========================
+
+Bugfixes
+--------
+
+- Update `pg` dependency to `8.1.0` to fix NodeJS 14 compatibility.
+  **Be aware** that this means that unauthorized SSL connections are now rejected as of [pg@8.0.0](https://github.com/brianc/node-postgres/blob/master/CHANGELOG.md#pg800) ([\#1050](https://github.com/matrix-org/matrix-appservice-irc/issues/1050))
+- Fixed a crash related to an invalid `ctcp-version` request ([\#1053](https://github.com/matrix-org/matrix-appservice-irc/issues/1053))
+- Add ability to limit the number of rooms that an instance can be bridged. ([\#1060](https://github.com/matrix-org/matrix-appservice-irc/issues/1060))
+- Fixed issue where setting initial sync to true for `membershipLists.room` entries would not work if syncing is off globally. ([\#1065](https://github.com/matrix-org/matrix-appservice-irc/issues/1065))
+
+
+Improved Documentation
+----------------------
+
+- Corrects tutorial port numbers for docker so that copying/pasting will properly run with default port numbers. ([\#1048](https://github.com/matrix-org/matrix-appservice-irc/issues/1048))
+
+
+Internal Changes
+----------------
+
+- Update `sanitizeHtml` package. ([\#1066](https://github.com/matrix-org/matrix-appservice-irc/issues/1066))
+
+
+0.17.1 (2020-05-06)
 ====================
 
 Features

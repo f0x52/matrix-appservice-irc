@@ -1,5 +1,4 @@
 import { IrcBridge } from "./IrcBridge";
-import { QuitDebouncer } from "./QuitDebouncer";
 import { Queue } from "../util/Queue";
 import { RoomAccessSyncer } from "./RoomAccessSyncer";
 import { IrcServer, MembershipSyncKind } from "../irc/IrcServer";
@@ -15,7 +14,7 @@ import { RoomOrigin } from "../datastore/DataStore";
 import QuickLRU from "quick-lru";
 import { MembershipQueue } from "../util/MembershipQueue";
 import { IrcMessage } from "../irc/ConnectionInstance";
-
+import { trackChannelAndCreateRoom } from "../bridge/RoomCreation";
 const NICK_USERID_CACHE_MAX = 512;
 const PM_POWERLEVEL_MATRIXUSER = 10;
 const PM_POWERLEVEL_IRCUSER = 100;
@@ -47,8 +46,6 @@ export class IrcHandler {
     // maintain a map of which user ID is in which PM room, so we know if we
     // need to re-invite them if they bail.
     private readonly roomIdToPrivateMember: RoomIdtoPrivateMember = {};
-
-    private readonly quitDebouncer: QuitDebouncer;
 
     // Use per-channel queues to keep the setting of topics in rooms atomic in
     // order to prevent races involving several topics being received from IRC
@@ -85,7 +82,6 @@ export class IrcHandler {
         private readonly ircBridge: IrcBridge,
         config: IrcHandlerConfig = {},
         private readonly membershipQueue: MembershipQueue) {
-        this.quitDebouncer = new QuitDebouncer(ircBridge);
         this.roomAccessSyncer = new RoomAccessSyncer(ircBridge);
         this.mentionMode = config.mapIrcMentionsToMatrix || "on";
         this.getMetrics();
@@ -346,77 +342,21 @@ export class IrcHandler {
         req.log.info("Mapped to %s", JSON.stringify(virtualMatrixUser));
         const matrixRooms = await this.ircBridge.getStore().getMatrixRoomsForChannel(server, channel);
         const roomAlias = server.getAliasFromChannel(channel);
-
+        const inviteIntent = this.ircBridge.getAppServiceBridge().getIntent(
+            virtualMatrixUser.getId()
+        );
         if (matrixRooms.length === 0) {
-            const initialState: unknown[] = [
+            const { mxRoom } = await trackChannelAndCreateRoom(
+                this.ircBridge,
+                req,
                 {
-                    type: "m.room.join_rules",
-                    state_key: "",
-                    content: {
-                        join_rule: server.getJoinRule()
-                    }
-                },
-                {
-                    type: "m.room.history_visibility",
-                    state_key: "",
-                    content: {
-                        history_visibility: "joined"
-                    }
+                    origin: "join",
+                    ircChannel: channel,
+                    server: server,
+                    inviteList: [],
+                    roomAliasName: roomAlias.split(":")[0].substring(1),
+                    intent: inviteIntent,
                 }
-            ];
-            if (server.areGroupsEnabled()) {
-                initialState.push({
-                    type: "m.room.related_groups",
-                    state_key: "",
-                    content: {
-                        groups: [server.getGroupId()]
-                    }
-                });
-            }
-
-            if (this.ircBridge.stateSyncer) {
-                initialState.push(
-                    this.ircBridge.stateSyncer.createInitialState(
-                        server,
-                        channel,
-                    )
-                )
-            }
-            const ircRoom = await this.ircBridge.trackChannel(server, channel);
-            const response = await this.ircBridge.getAppServiceBridge().getIntent(
-                virtualMatrixUser.getId()
-            ).createRoom({
-                options: {
-                    room_alias_name: roomAlias.split(":")[0].substring(1), // localpart
-                    name: channel,
-                    visibility: "private",
-                    preset: "public_chat",
-                    creation_content: {
-                        "m.federate": server.shouldFederate()
-                    },
-                    initial_state: initialState,
-                }
-            });
-
-            // store the mapping
-            const mxRoom = new MatrixRoom(response.room_id);
-            await this.ircBridge.getStore().storeRoom(
-                ircRoom, mxRoom, 'join'
-            );
-
-            // /mode the channel AFTER we have created the mapping so we process +s and +i correctly.
-            this.ircBridge.publicitySyncer.initModeForChannel(
-                server, channel
-            ).catch(() => {
-                req.log.error(
-                    "Could not init mode channel %s on %s",
-                    channel, server
-                );
-            });
-
-            req.log.info(
-                "Created a room to track %s on %s and invited %s",
-                ircRoom.channel, server.domain, virtualMatrixUser.getId()
             );
             matrixRooms.push(mxRoom);
         }
@@ -669,8 +609,6 @@ export class IrcHandler {
             return BridgeRequestErr.ERR_VIRTUAL_USER;
         }
 
-        this.quitDebouncer.onJoin(nick, server);
-
         // get virtual matrix user
         const matrixUser = await this.ircBridge.getMatrixUser(joiningUser);
         const matrixRooms = await this.ircBridge.getStore().getMatrixRoomsForChannel(server, chan);
@@ -745,7 +683,7 @@ export class IrcHandler {
                 server, kickee.nick
             );
             if (!bridgedIrcClient || bridgedIrcClient.isBot || !bridgedIrcClient.userId) {
-                return; // unexpected given isVirtual == true, but meh, bail.
+                return; // unexpected given isVirtual === true, but meh, bail.
             }
             const userId = bridgedIrcClient.userId;
             await Promise.all(matrixRooms.map((room) =>
@@ -838,18 +776,6 @@ export class IrcHandler {
         }
         else {
             const matrixUser = await this.ircBridge.getMatrixUser(leavingUser);
-            // Presence syncing and Quit Debouncing
-            //  When an IRC user quits, debounce before leaving them from matrix rooms. In the meantime,
-            //  update presence to "offline". If the user rejoins a channel before timeout, do not part
-            //  user from the room. Otherwise timeout and leave rooms.
-            if (kind === "quit" && server.shouldDebounceQuits()) {
-                const shouldBridgePart = await this.quitDebouncer.debounceQuit(
-                    req, server, matrixUser, nick
-                );
-                if (!shouldBridgePart) {
-                    return undefined;
-                }
-            }
             userId = matrixUser.userId;
         }
 
