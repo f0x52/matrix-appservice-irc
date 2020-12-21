@@ -20,7 +20,7 @@ import Bluebird from "bluebird";
 import { BridgeRequest } from "../models/BridgeRequest";
 import { IrcClientConfig } from "../models/IrcClientConfig";
 import { IrcServer } from "../irc/IrcServer";
-import { PrometheusMetrics, MatrixUser, MatrixRoom } from "matrix-appservice-bridge";
+import { AgeCounters, MatrixUser, MatrixRoom } from "matrix-appservice-bridge";
 import { BridgedClient, BridgedClientStatus } from "./BridgedClient";
 import { IrcBridge } from "../bridge/IrcBridge";
 import { IdentGenerator } from "./IdentGenerator";
@@ -28,7 +28,10 @@ import { Ipv6Generator } from "./Ipv6Generator";
 import { IrcEventBroker } from "./IrcEventBroker";
 import { DataStore } from "../datastore/DataStore";
 import { Gauge } from "prom-client";
+import QuickLRU from "quick-lru";
 const log = getLogger("ClientPool");
+
+const NICK_CACHE_SIZE = 256;
 
 interface ReconnectionItem {
     cli: BridgedClient;
@@ -42,7 +45,7 @@ interface ReconnectionItem {
 export class ClientPool {
     private botClients: Map<string, BridgedClient>;
     private virtualClients: { [serverDomain: string]: {
-        nicks: Map<string, BridgedClient>;
+        nicks: QuickLRU<string, BridgedClient>;
         userIds: Map<string, BridgedClient>;
         pending: Map<string, BridgedClient>;
     };};
@@ -74,7 +77,7 @@ export class ClientPool {
             return false;
         }
 
-        if (this.getBridgedClientByNick(server, nick)) {
+        if (this.getBridgedClientByNick(server, nick, true)) {
             return true;
         }
 
@@ -82,15 +85,14 @@ export class ClientPool {
         return this.virtualClients[server.domain].pending.has(nick)
     }
 
-    public killAllClients() {
+    public killAllClients(reason?: string) {
         return Bluebird.all(Object.keys(this.virtualClients).map((domain) =>
             [
-                ...this.virtualClients[domain].nicks.values(),
                 ...this.virtualClients[domain].userIds.values(),
                 this.botClients.get(domain),
             ]
         ).map((clients) =>
-            Promise.all(clients.map((client) => client?.kill()))
+            Promise.all(clients.map((client) => client?.kill(reason)))
         ));
     }
 
@@ -120,10 +122,9 @@ export class ClientPool {
     }
 
     public async loginToServer(server: IrcServer): Promise<BridgedClient> {
-        const uname = "matrixirc";
-        let bridgedClient = this.getBridgedClientByNick(server, uname);
+        let bridgedClient = this.getBot(server);
         if (!bridgedClient) {
-            const botIrcConfig = server.createBotIrcClientConfig(uname);
+            const botIrcConfig = server.createBotIrcClientConfig();
             bridgedClient = this.createIrcClient(botIrcConfig, null, true);
             log.debug(
                 "Created new bot client for %s : %s (bot enabled=%s)",
@@ -280,7 +281,7 @@ export class ClientPool {
 
         if (this.virtualClients[server.domain] === undefined) {
             this.virtualClients[server.domain] = {
-                nicks: new Map(),
+                nicks: new QuickLRU({maxSize: NICK_CACHE_SIZE}),
                 userIds: new Map(),
                 pending: new Map(),
             };
@@ -340,17 +341,28 @@ export class ClientPool {
         return cli;
     }
 
-    public getBridgedClientByNick(server: IrcServer, nick: string) {
+    public getBridgedClientByNick(server: IrcServer, nick: string, allowDead = false) {
         const bot = this.getBot(server);
         if (bot && bot.nick === nick) {
             return bot;
         }
 
-        if (!this.virtualClients[server.domain]) {
+        const serverSet = this.virtualClients[server.domain];
+
+        if (!serverSet) {
             return undefined;
         }
-        const cli = this.virtualClients[server.domain].nicks.get(nick);
-        if (cli?.isDead()) {
+
+        let cli = serverSet.nicks.get(nick);
+        if (!cli) {
+            cli = [...serverSet.userIds.values()].find(c => c.nick === nick);
+            if (!cli) {
+                return undefined;
+            }
+            serverSet.nicks.set(cli.nick, cli);
+        }
+
+        if (!allowDead && cli.isDead()) {
             return undefined;
         }
         return cli;
@@ -413,13 +425,16 @@ export class ClientPool {
 
         // find the oldest client to kill.
         let oldest: BridgedClient|null = null;
-        for (const client of this.virtualClients[server.domain].nicks.values()) {
+        for (const client of this.virtualClients[server.domain].userIds.values()) {
             if (!client) {
                 // possible since undefined/null values can be present from culled entries
                 continue;
             }
             if (client.isBot) {
                 continue; // don't ever kick the bot off.
+            }
+            if (client.status !== BridgedClientStatus.CONNECTED) {
+                continue; // Don't kick clients that aren't connected.
             }
             if (oldest === null) {
                 oldest = client;
@@ -464,7 +479,7 @@ export class ClientPool {
         return 0;
     }
 
-    public updateActiveConnectionMetrics(serverDomain: string, ageCounter: PrometheusMetrics.AgeCounters): void {
+    public updateActiveConnectionMetrics(serverDomain: string, ageCounter: AgeCounters): void {
         if (this.virtualClients[serverDomain] === undefined) {
             return;
         }
@@ -481,7 +496,7 @@ export class ClientPool {
     public getNickUserIdMappingForChannel(server: IrcServer, channel: string): {[nick: string]: string} {
         const nickUserIdMap: {[nick: string]: string} = {};
         for (const [userId, client] of this.virtualClients[server.domain].userIds.entries()) {
-            if (client.chanList.includes(channel)) {
+            if (client.inChannel(channel)) {
                 nickUserIdMap[client.nick] = userId;
             }
         }
@@ -569,7 +584,7 @@ export class ClientPool {
         const isBot = bridgedClient.isBot;
         const chanList = bridgedClient.chanList;
 
-        if (chanList.length === 0 && !isBot && disconnectReason !== "iwanttoreconnect") {
+        if (chanList.size === 0 && !isBot && disconnectReason !== "iwanttoreconnect") {
             // Never drop the bot, or users that really want to reconnect.
             log.info(
                 `Dropping ${bridgedClient.id} (${bridgedClient.nick}) because they are not joined to any channels`
@@ -612,13 +627,13 @@ export class ClientPool {
         if (queue === null) {
             this.reconnectClient({
                 cli: cli,
-                chanList: chanList,
+                chanList: [...chanList],
             });
             return;
         }
         queue.enqueue(cli.id, {
             cli: cli,
-            chanList: chanList,
+            chanList: [...chanList],
         });
     }
 

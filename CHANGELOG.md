@@ -1,3 +1,172 @@
+ 0.23.0 (2020-12-01)
+====================
+
+No significant changes.
+
+
+0.23.0-rc1 (2020-11-24)
+====================
+
+Features
+--------
+
+- Add membership queue Prometheus metrics under the prefix `bridge_membershipqueue_`. ([\#1185](https://github.com/matrix-org/matrix-appservice-irc/issues/1185))
+- Fix a performance issue where many mode changes in quick succession for a channel would cause many m.room.power_level events to be created. ([\#1186](https://github.com/matrix-org/matrix-appservice-irc/issues/1186))
+- When multiple users leave the room at the same time, batch together powerlevel removals ([\#1196](https://github.com/matrix-org/matrix-appservice-irc/issues/1196))
+
+
+Bugfixes
+--------
+
+- Reduce verbosity of some log lines from INFO to DEBUG ([\#1168](https://github.com/matrix-org/matrix-appservice-irc/issues/1168))
+- Drop IRC messages directed towards invalid nicks early. ([\#1189](https://github.com/matrix-org/matrix-appservice-irc/issues/1189))
+- Improve the performance of sending messages by speeding up some function calls ([\#1192](https://github.com/matrix-org/matrix-appservice-irc/issues/1192))
+
+
+Internal Changes
+----------------
+
+- Improve the handling speed of IRC joins. ([\#1187](https://github.com/matrix-org/matrix-appservice-irc/issues/1187))
+
+
+0.22.0 (2020-11-06)
+====================
+
+No significant changes.
+
+
+0.22.0-rc1 (2020-10-28)
+====================
+
+**Breaking Change**: We've renamed the `/killPortal` DebugAPI endpoint to `/killRoom`, and it will now unbridge all types of rooms rather than just portal rooms.
+
+Features
+--------
+
+- Pre-emptively ignore users who are already idle when starting up the bridge ([\#1156](https://github.com/matrix-org/matrix-appservice-irc/issues/1156))
+- Propagate a reason all the way through killing the bridge ([\#1159](https://github.com/matrix-org/matrix-appservice-irc/issues/1159))
+- Add startup check to ensure the homeserver can send the bridge events. ([\#1160](https://github.com/matrix-org/matrix-appservice-irc/issues/1160))
+- Replace `/killPortal` debug API with `/killRoom` API, which works for all bridge mapping types ([\#1169](https://github.com/matrix-org/matrix-appservice-irc/issues/1169))
+
+
+Bugfixes
+--------
+
+- Don't wait for leaves to complete when running the reaping script ([\#1147](https://github.com/matrix-org/matrix-appservice-irc/issues/1147))
+- Fix bug where m.audio files would not be forwarded to IRC ([\#1150](https://github.com/matrix-org/matrix-appservice-irc/issues/1150))
+- Do not change a Matrix user's IRC nickname unless their profile has also changed ([\#1157](https://github.com/matrix-org/matrix-appservice-irc/issues/1157))
+- Fixed an issue where the bridge would kick users from rooms they never joined ([\#1165](https://github.com/matrix-org/matrix-appservice-irc/issues/1165))
+
+
+Internal Changes
+----------------
+
+- Determine user activeness based off presence, typing and read receipts when kicking idle users. ([\#1152](https://github.com/matrix-org/matrix-appservice-irc/issues/1152))
+- Bridge IRC `reason`s when users QUIT or PART ([\#1161](https://github.com/matrix-org/matrix-appservice-irc/issues/1161))
+- Remove hacks around reconnections on startup ([\#1162](https://github.com/matrix-org/matrix-appservice-irc/issues/1162))
+
+
+0.21.0 (2020-10-15)
+====================
+
+No significant changes.
+
+
+0.21.0-rc3 (2020-10-13)
+========================
+
+Features
+--------
+
+- Add support for reconfiguring the bridge at runtime by sending a `SIGHUP` ([\#1145](https://github.com/matrix-org/matrix-appservice-irc/issues/1145))
+
+
+Bugfixes
+--------
+
+- Fix a bug where the bridge would leave a user after joining ([\#1143](https://github.com/matrix-org/matrix-appservice-irc/issues/1143))
+- Fix more cases of double bridged users ([\#1146](https://github.com/matrix-org/matrix-appservice-irc/issues/1146))
+- Fix a bug where a user leaving with a reason would cause them to join then leave ([\#1151](https://github.com/matrix-org/matrix-appservice-irc/issues/1151))
+
+
+Internal Changes
+----------------
+
+- Add index to client_config for `config->>username` to speed up username lookups ([\#1148](https://github.com/matrix-org/matrix-appservice-irc/issues/1148))
+
+
+0.21.0-rc2 (2020-10-13)
+========================
+
+Features
+--------
+
+- Add support for reconfiguring the bridge at runtime by sending a `SIGHUP` ([\#1145](https://github.com/matrix-org/matrix-appservice-irc/issues/1145))
+
+
+Bugfixes
+--------
+
+- Fix a bug where the bridge would leave a user after joining ([\#1143](https://github.com/matrix-org/matrix-appservice-irc/issues/1143))
+- Fix more cases of double bridged users ([\#1146](https://github.com/matrix-org/matrix-appservice-irc/issues/1146))
+- Fix a bug where a user leaving with a reason would cause them to join then leave ([\#1151](https://github.com/matrix-org/matrix-appservice-irc/issues/1151))
+
+
+Internal Changes
+----------------
+
+- Add index to client_config for `config->>username` to speed up username lookups ([\#1148](https://github.com/matrix-org/matrix-appservice-irc/issues/1148))
+
+
+0.21.0-rc2 (2020-10-09)
+========================
+
+Bugfixes
+--------
+
+- Fix a bug where the bridge would leave a user after joining ([\#1143](https://github.com/matrix-org/matrix-appservice-irc/issues/1143))
+
+
+0.21.0-rc1 (2020-10-07)
+========================
+
+Features
+--------
+
+- Implement mechanisms to fix powerlevels in rooms if messages fail to bridge ([\#1054](https://github.com/matrix-org/matrix-appservice-irc/issues/1054))
+
+
+Bugfixes
+--------
+
+- Fix a bug where connection reaping would not work sometimes if the bridge could not use the synapse whois admin endpoint ([\#1131](https://github.com/matrix-org/matrix-appservice-irc/issues/1131))
+- Fixes Matrix displayName not being updated properly. Thanks to @BernardZhao ([\#1137](https://github.com/matrix-org/matrix-appservice-irc/issues/1137))
+
+
+Internal Changes
+----------------
+
+- Use types from `matrix-appservice-bridge` rather than local definitions. ([\#1101](https://github.com/matrix-org/matrix-appservice-irc/issues/1101))
+- Fix attribution link in CONTRIBUTING.md ([\#1132](https://github.com/matrix-org/matrix-appservice-irc/issues/1132))
+- The deprecated remove-idle-users.py has been removed. Bridge admins should use the /reapUsers Debug API endpoint instead ([\#1139](https://github.com/matrix-org/matrix-appservice-irc/issues/1139))
+
+
+0.20.2 (2020-08-21)
+====================
+
+Features
+--------
+
+- Add Grafana dashboard sample ([\#1122](https://github.com/matrix-org/matrix-appservice-irc/issues/1122))
+
+
+Bugfixes
+--------
+
+- Reconnect to the correct domain on passsword changes. Thanks to @palmer-dabbelt ([\#1000](https://github.com/matrix-org/matrix-appservice-irc/issues/1000))
+- Improve performance of generating a username ([\#1121](https://github.com/matrix-org/matrix-appservice-irc/issues/1121))
+
+
 0.20.1 (2020-08-17)
 ========================
 

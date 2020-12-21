@@ -40,6 +40,9 @@
             "level": "debug",
             "toConsole": true
         },
+        "ircHandler": {
+            "powerLevelGracePeriodMs": 500
+        },
         "servers": {
             "irc.example": {
                 "port": 6667,
@@ -50,6 +53,7 @@
                 "botConfig": {
                     "enabled": true,
                     "nick": "ro_bot_nick",
+                    "username": "matrixbot",
                     "joinChannelsIfNoUsers": true
                 },
                 "privateMessages": {

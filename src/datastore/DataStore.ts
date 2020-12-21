@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { MatrixRoom, MatrixUser, Entry} from "matrix-appservice-bridge";
+import { MatrixRoom, MatrixUser, RoomBridgeStoreEntry as Entry} from "matrix-appservice-bridge";
 import Bluebird from "bluebird";
 import { IrcRoom } from "../models/IrcRoom";
 import { IrcClientConfig } from "../models/IrcClientConfig";
@@ -83,7 +83,7 @@ export interface DataStore {
      * aliasing and "join" if it was created during a join.
      * @return {Promise}
      */
-    removeRoom(roomId: string, ircDomain: string, ircChannel: string, origin: RoomOrigin): Promise<void>;
+    removeRoom(roomId: string, ircDomain: string, ircChannel: string, origin?: RoomOrigin): Promise<void>;
 
     /**
      * Retrieve a list of IRC rooms for a given room ID.
@@ -159,6 +159,8 @@ export interface DataStore {
     removePass(userId: string, domain: string): Promise<void>;
 
     getMatrixUserByUsername(domain: string, username: string): Promise<MatrixUser|undefined>;
+
+    getCountForUsernamePrefix(domain: string, usernamePrefix: string): Promise<number>;
 
     roomUpgradeOnRoomMigrated(oldRoomId: string, newRoomId: string): Promise<void>;
 

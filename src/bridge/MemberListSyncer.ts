@@ -3,16 +3,16 @@
 
 import Bluebird from "bluebird";
 import { IrcBridge } from "./IrcBridge";
-import { AppserviceBot } from "matrix-appservice-bridge";
+import { AppServiceBot, MembershipQueue } from "matrix-appservice-bridge";
 import { IrcServer } from "../irc/IrcServer";
 import { QueuePool } from "../util/QueuePool";
 import logging from "../logging";
 import { IrcRoom } from "../models/IrcRoom";
-import { BridgeRequest } from "../models/BridgeRequest";
 import * as promiseutil from "../promiseutil";
-import { Queue } from "../util/Queue";
+import { BridgeRequest } from "../models/BridgeRequest";
 
 const log = logging("MemberListSyncer");
+const LEAVE_TTL_MS = 30 * 60 * 1000; // 30 mins
 
 interface MemberStateEvent {
     type: string;
@@ -49,26 +49,9 @@ export class MemberListSyncer {
         irc: {},
         matrix: {},
     }
-    private leaveQueuePool: QueuePool<LeaveQueueItem>;
-    constructor(private ircBridge: IrcBridge, private appServiceBot: AppserviceBot, private server: IrcServer,
+    constructor(private ircBridge: IrcBridge, private memberQueue: MembershipQueue,
+                private appServiceBot: AppServiceBot, private server: IrcServer,
                 private appServiceUserId: string, private injectJoinFn: InjectJoinFn) {
-        // A queue which controls the rate at which leaves are sent to Matrix. We need this queue
-        // because Synapse is slow. Synapse locks based on the room ID, so there is no benefit to
-        // having 2 in-flight requests for the same room ID. As a result, we want to queue based
-        // on the room ID, and let N "room queues" be processed concurrently. This can be
-        // represented as a QueuePool of size N, which enqueues all the requests for a single
-        // room in one go, which we can do because IRC sends all the nicks down as NAMES. For each
-        // block of users in a room queue, we need another Queue to ensure that there is only ever
-        // 1 in-flight leave request at a time per room queue.
-        this.leaveQueuePool = new QueuePool(3, this.leaveUsersInRoom.bind(this));
-    }
-
-    public isRemoteJoinedToRoom(roomId: string, userId: string) {
-        const room = this.memberLists.matrix[roomId];
-        if (room) {
-            return room.remoteJoinedUsers.includes(userId);
-        }
-        return false;
     }
 
     public async sync() {
@@ -195,7 +178,7 @@ export class MemberListSyncer {
             // fetch joined members allowing 50 in-flight reqs at a time
             const pool = new QueuePool(50, async (_roomId) => {
                 const roomId = _roomId as string;
-                let userMap = null;
+                let userMap: Record<string, {display_name: string}>|undefined;
                 while (!userMap) {
                     try {
                         userMap = await this.appServiceBot.getJoinedMembers(roomId);
@@ -250,8 +233,7 @@ export class MemberListSyncer {
         return this.syncableRoomsPromise;
     }
 
-    private joinMatrixUsersToChannels(rooms: RoomInfo[], injectJoinFn: InjectJoinFn) {
-        const d = promiseutil.defer();
+    private async joinMatrixUsersToChannels(rooms: RoomInfo[], injectJoinFn: InjectJoinFn) {
 
         // filter out rooms listed in the rules
         const filteredRooms: RoomInfo[] = [];
@@ -278,8 +260,17 @@ export class MemberListSyncer {
         // map the filtered rooms to a list of users to join
         // [Room:{reals:[uid,uid]}, ...] => [{uid,roomid}, ...]
         const entries: { roomId: string; displayName: string; userId: string; frontier: boolean}[] = [];
-        filteredRooms.forEach((roomInfo) => {
-            roomInfo.realJoinedUsers.forEach((uid, index) => {
+        const idleRegex = this.server.ignoreIdleUsersOnStartupExcludeRegex;
+        for (const roomInfo of filteredRooms) {
+            for (const uid of roomInfo.realJoinedUsers) {
+                if (this.server.ignoreIdleUsersOnStartup) {
+                    const idle = await this.ircBridge.activityTracker?.isUserOnline(
+                        uid, this.server.ignoreIdleUsersOnStartupAfterMs, false
+                    );
+                    if (!(idle?.online) && !idleRegex?.exec(uid)) {
+                        continue;
+                    }
+                }
                 entries.push({
                     roomId: roomInfo.id,
                     displayName: roomInfo.displayNames[uid],
@@ -287,10 +278,10 @@ export class MemberListSyncer {
                     // Mark the first real matrix user f.e room so we can inject
                     // them first to get back up and running more quickly when there
                     // is no bot.
-                    frontier: (index === 0)
+                    frontier: !entries.find((ent) => ent.roomId === roomInfo.id),
                 });
-            });
-        });
+            }
+        }
         // sort frontier markers to the front of the array
         entries.sort((a, b) => {
             if (a.frontier && !b.frontier) {
@@ -304,14 +295,15 @@ export class MemberListSyncer {
 
         log.debug("Got %s matrix join events to inject.", entries.length);
         this.usersToJoin = entries.length;
+        const d = promiseutil.defer();
         // take the first entry and inject a join event
         const joinNextUser = () => {
-            this.usersToJoin--;
             const entry = entries.shift();
             if (!entry) {
                 d.resolve();
                 return;
             }
+            this.usersToJoin--;
             if (entry.userId.startsWith("@-")) {
                 joinNextUser();
                 return;
@@ -349,28 +341,17 @@ export class MemberListSyncer {
         });
     }
 
-    // Critical section of the leave queue pool.
-    // item looks like:
-    // {
-    //   roomId: "!foo:bar", userIds: [ "@alice:bar", "@bob:bar", ... ]
-    // }
     private async leaveUsersInRoom(item: LeaveQueueItem) {
-        // We need to queue these up in ANOTHER queue so as not to have
-        // 2 in-flight requests at the same time. We return a promise which resolves
-        // when this room is completely done.
-        const q = new Queue<string>(async (userId) => {
-            log.debug(`Leaving ${userId} from ${item.roomId}`);
-            // Do this here, we might not manage to leave but we won't retry.
-            this.usersToLeave--;
-            await this.ircBridge.getAppServiceBridge().getIntent(userId).leave(item.roomId);
-        });
+        const req = new BridgeRequest(this.ircBridge.getAppServiceBridge().getRequestFactory().newRequest());
 
-        await Promise.all(item.userIds.map((userId) =>
-            q.enqueue(userId, userId)
-        ));
+        await Promise.all(item.userIds.map((userId) => {
+            log.debug(`Leaving ${userId} from ${item.roomId}`);
+            this.usersToLeave--;
+            return this.memberQueue.leave(item.roomId, userId, req, false, undefined, undefined, LEAVE_TTL_MS);
+        }));
 
         // Make sure to deop any users
-        await this.ircBridge.ircHandler.roomAccessSyncer.removePowerLevels(item.roomId, item.userIds);
+        await this.ircBridge.ircHandler.roomAccessSyncer.removePowerLevels(item.roomId, item.userIds, req);
     }
 
     // Update the MemberListSyncer with the IRC NAMES_RPL that has been received for channel.
@@ -426,8 +407,8 @@ export class MemberListSyncer {
             }
             totalLeavingUsers += usersToLeave.length;
             // ID is the complete mapping of roomID/channel which will be unique
-            promises.push(this.leaveQueuePool.enqueue(roomId + " " + channel, {
-                roomId: roomId,
+            promises.push(this.leaveUsersInRoom({
+                roomId,
                 userIds: usersToLeave,
             }));
         });
@@ -446,9 +427,9 @@ export class MemberListSyncer {
         return this.usersToLeave;
     }
 
-    public addToLeavePool(userIds: string[], roomId: string, channel: string) {
+    public addToLeavePool(userIds: string[], roomId: string) {
         this.usersToLeave += userIds.length;
-        this.leaveQueuePool.enqueue(roomId + " " + channel, {
+        this.leaveUsersInRoom({
             roomId,
             userIds
         });

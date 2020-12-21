@@ -282,6 +282,11 @@ export class IrcEventBroker {
         connInst.addListener("message", (from: string, to: string, text: string) => {
             if (to.startsWith("#")) { return; }
             const req = createRequest();
+            // Check and drop here, because we want to avoid the performance impact.
+            if (!IrcEventBroker.isValidNick(to)) {
+                req.resolve(BridgeRequestErr.ERR_DROPPED);
+                return;
+            }
             complete(req, ircHandler.onPrivateMessage(
                 req,
                 server, createUser(from), createUser(to),
@@ -291,6 +296,11 @@ export class IrcEventBroker {
         connInst.addListener("notice", (from: string, to: string, text: string) => {
             if (!from || to.startsWith("#")) { return; }
             const req = createRequest();
+            // Check and drop here, because we want to avoid the performance impact.
+            if (!IrcEventBroker.isValidNick(to)) {
+                req.resolve(BridgeRequestErr.ERR_DROPPED);
+                return;
+            }
             complete(req, ircHandler.onPrivateMessage(
                 req,
                 server, createUser(from), createUser(to),
@@ -301,6 +311,11 @@ export class IrcEventBroker {
             if (to.startsWith("#")) { return; }
             if (text.startsWith("ACTION ")) {
                 const req = createRequest();
+                // Check and drop here, because we want to avoid the performance impact.
+                if (!IrcEventBroker.isValidNick(to)) {
+                    req.resolve(BridgeRequestErr.ERR_DROPPED);
+                    return;
+                }
                 complete(req, ircHandler.onPrivateMessage(
                     req,
                     server, createUser(from), createUser(to),
@@ -330,10 +345,10 @@ export class IrcEventBroker {
 
         // Listen for other events
 
-        this.hookIfClaimed(client, connInst, "part", (chan: string, nick: string, /* reason: string */) => {
+        this.hookIfClaimed(client, connInst, "part", (chan: string, nick: string, reason: string) => {
             const req = createRequest();
             complete(req, ircHandler.onPart(
-                req, server, createUser(nick), chan, "part"
+                req, server, createUser(nick), chan, "part", reason
             ));
         });
         this.hookIfClaimed(client, connInst, "quit", (nick: string, reason: string, chans: string[]) => {
@@ -343,7 +358,7 @@ export class IrcEventBroker {
                 chans.forEach((chan) => {
                     const req = createRequest();
                     complete(req, ircHandler.onPart(
-                        req, server, createUser(nick), chan, "quit"
+                        req, server, createUser(nick), chan, "quit", reason
                     ));
                 });
             }
@@ -563,5 +578,10 @@ export class IrcEventBroker {
             }
             await req();
         })();
+    }
+
+    static isValidNick(nick: string) {
+        // The first character must be one of these.
+        return /^[A-Za-z\[\]\\`_^\{\|\}]/.test(nick[0]);
     }
 }

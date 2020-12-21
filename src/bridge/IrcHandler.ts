@@ -4,7 +4,7 @@ import { RoomAccessSyncer } from "./RoomAccessSyncer";
 import { IrcServer, MembershipSyncKind } from "../irc/IrcServer";
 import { BridgeRequest, BridgeRequestErr } from "../models/BridgeRequest";
 import { BridgedClient } from "../irc/BridgedClient";
-import { MatrixRoom, MatrixUser } from "matrix-appservice-bridge";
+import { MatrixRoom, MatrixUser, MembershipQueue } from "matrix-appservice-bridge";
 import { IrcUser } from "../models/IrcUser";
 import { IrcAction } from "../models/IrcAction";
 import { IrcRoom } from "../models/IrcRoom";
@@ -12,14 +12,14 @@ import { MatrixAction } from "../models/MatrixAction";
 import { RequestLogger } from "../logging";
 import { RoomOrigin } from "../datastore/DataStore";
 import QuickLRU from "quick-lru";
-import { MembershipQueue } from "../util/MembershipQueue";
 import { IrcMessage } from "../irc/ConnectionInstance";
 import { trackChannelAndCreateRoom } from "../bridge/RoomCreation";
 const NICK_USERID_CACHE_MAX = 512;
 const PM_POWERLEVEL_MATRIXUSER = 10;
 const PM_POWERLEVEL_IRCUSER = 100;
+const MEMBERSHIP_INITIAL_TTL_MS = 30 * 60 * 1000; // 30 mins
 
-type MatrixMembership = "join"|"invite"|"leave"|"ban";
+export type MatrixMembership = "join"|"invite"|"leave"|"ban";
 
 interface RoomIdtoPrivateMember {
     [roomId: string]: {
@@ -37,7 +37,7 @@ interface TopicQueueItem {
 
 export interface IrcHandlerConfig {
     mapIrcMentionsToMatrix?: "on"|"off"|"force-off";
-    leaveConcurrency?: number;
+    powerLevelGracePeriodMs?: number;
 }
 
 type MetricNames = "join.names"|"join"|"part"|"pm"|"invite"|"topic"|"message"|"kick"|"mode";
@@ -69,7 +69,7 @@ export class IrcHandler {
     "off" - Defaults to disabled, users can choose to enable.
     "force-off" - Disabled, cannot be enabled.
     */
-    private readonly mentionMode: "on"|"off"|"force-off";
+    private mentionMode: "on"|"off"|"force-off";
 
     public readonly roomAccessSyncer: RoomAccessSyncer;
 
@@ -116,7 +116,7 @@ export class IrcHandler {
             this.roomIdToPrivateMember[roomId] = priv;
 
             // query room state to see if the user is actually joined.
-            log.info("Querying PM room state (%s) between %s and %s",
+            log.debug("Querying PM room state (%s) between %s and %s",
                 roomId, userId, virtUserId);
             priv = (await intent.getStateEvent(roomId, "m.room.member", userId));
             this.roomIdToPrivateMember[roomId] = priv;
@@ -139,10 +139,10 @@ export class IrcHandler {
     /**
      * Create a new matrix PM room for an IRC user  with nick `fromUserNick` and another
      * matrix user with user ID `toUserId`.
-     * @param {string} toUserId : The user ID of the recipient.
-     * @param {string} fromUserId : The user ID of the sender.
-     * @param {string} fromUserNick : The nick of the sender.
-     * @param {IrcServer} server : The sending IRC server.
+     * @param {string} toUserId The user ID of the recipient.
+     * @param {string} fromUserId The user ID of the sender.
+     * @param {string} fromUserNick The nick of the sender.
+     * @param {IrcServer} server The sending IRC server.
      * @return {Promise} which is resolved when the PM room has been created.
      */
     private async createPmRoom (toUserId: string, fromUserId: string, fromUserNick: string, server: IrcServer) {
@@ -193,10 +193,10 @@ export class IrcHandler {
 
     /**
      * Called when the AS receives an IRC message event.
-     * @param {IrcServer} server : The sending IRC server.
-     * @param {IrcUser} fromUser : The sender.
-     * @param {IrcUser} toUser : The target.
-     * @param {Object} action : The IRC action performed.
+     * @param {IrcServer} server The sending IRC server.
+     * @param {IrcUser} fromUser The sender.
+     * @param {IrcUser} toUser The target.
+     * @param {Object} action The IRC action performed.
      * @return {Promise} which is resolved/rejected when the request
      * finishes.
      */
@@ -218,14 +218,14 @@ export class IrcHandler {
             req.log.error("Cannot route PM to %s - no client", toUser);
             return BridgeRequestErr.ERR_DROPPED;
         }
-        req.log.info("onPrivateMessage: %s from=%s to=%s action=%s",
-            server.domain, fromUser, toUser,
-            JSON.stringify(action).substring(0, 80)
+        req.log.info("onPrivateMessage: %s from=%s to=%s",
+            server.domain, fromUser, toUser
         );
+        req.log.debug("action=%s", JSON.stringify(action).substring(0, 80));
 
         if (bridgedIrcClient.isBot) {
             if (action.type !== "message") {
-                req.log.info("Ignoring non-message PM");
+                req.log.debug("Ignoring non-message PM");
                 return BridgeRequestErr.ERR_DROPPED;
             }
             req.log.debug("Rerouting PM directed to the bot from %s to provisioning", fromUser);
@@ -233,15 +233,16 @@ export class IrcHandler {
             return undefined;
         }
 
+        if (!server.allowsPms()) {
+            req.log.error("Server %s disallows PMs.", server.domain);
+            return BridgeRequestErr.ERR_DROPPED;
+        }
+
         if (!bridgedIrcClient.userId) {
             req.log.error("Cannot route PM to %s - no user id on client", toUser);
             return BridgeRequestErr.ERR_DROPPED;
         }
 
-        if (!server.allowsPms()) {
-            req.log.error("Server %s disallows PMs.", server.domain);
-            return BridgeRequestErr.ERR_DROPPED;
-        }
 
         const mxAction = MatrixAction.fromIrcAction(action);
 
@@ -251,7 +252,7 @@ export class IrcHandler {
         }
 
         const virtualMatrixUser = await this.ircBridge.getMatrixUser(fromUser);
-        req.log.info("Mapped to %s", JSON.stringify(virtualMatrixUser));
+        req.log.debug(`Mapped ${fromUser.nick} -> ${virtualMatrixUser.getId()}`);
 
         // Try to get the room from the store.
         let pmRoom = await this.ircBridge.getStore().getMatrixPmRoom(
@@ -306,10 +307,10 @@ export class IrcHandler {
 
     /**
      * Called when the AS receives an IRC invite event.
-     * @param {IrcServer} server : The sending IRC server.
-     * @param {IrcUser} fromUser : The sender.
-     * @param {IrcUser} toUser : The target.
-     * @param {String} channel : The channel.
+     * @param {IrcServer} server The sending IRC server.
+     * @param {IrcUser} fromUser The sender.
+     * @param {IrcUser} toUser The target.
+     * @param {String} channel The channel.
      * @return {Promise} which is resolved/rejected when the request
      * finishes.
      */
@@ -339,7 +340,7 @@ export class IrcHandler {
         const ircClient = bridgedIrcClient;
 
         const virtualMatrixUser = await this.ircBridge.getMatrixUser(fromUser);
-        req.log.info("Mapped to %s", JSON.stringify(virtualMatrixUser));
+        req.log.debug("Mapped to %s", virtualMatrixUser.getId());
         const matrixRooms = await this.ircBridge.getStore().getMatrixRoomsForChannel(server, channel);
         const roomAlias = server.getAliasFromChannel(channel);
         const inviteIntent = this.ircBridge.getAppServiceBridge().getIntent(
@@ -424,23 +425,24 @@ export class IrcHandler {
 
     /**
      * Called when the AS receives an IRC topic event.
-     * @param {IrcServer} server : The sending IRC server.
-     * @param {IrcUser} fromUser : The sender.
-     * @param {string} channel : The target channel.
-     * @param {Object} action : The IRC action performed.
+     * @param {IrcServer} server The sending IRC server.
+     * @param {IrcUser} fromUser The sender.
+     * @param {string} channel The target channel.
+     * @param {Object} action The IRC action performed.
      * @return {Promise} which is resolved/rejected when the request finishes.
      */
     public async onTopic (req: BridgeRequest, server: IrcServer, fromUser: IrcUser,
                           channel: string, action: IrcAction) {
         this.incrementMetric("topic");
-        req.log.info("onTopic: %s from=%s to=%s action=%s",
-            server.domain, fromUser, channel, JSON.stringify(action).substring(0, 80)
-        );
-
         if (fromUser.isVirtual) {
             // Don't echo our topics back.
             return BridgeRequestErr.ERR_VIRTUAL_USER;
         }
+        req.log.info("onTopic: %s from=%s to=%s ",
+            server.domain, fromUser, channel
+        );
+        req.log.debug("action=%s", JSON.stringify(action).substring(0, 80));
+
 
         const ALLOWED_ORIGINS: RoomOrigin[] = ["join", "alias"];
         const topic = action.text;
@@ -481,10 +483,10 @@ export class IrcHandler {
 
     /**
      * Called when the AS receives an IRC message event.
-     * @param {IrcServer} server : The sending IRC server.
-     * @param {IrcUser} fromUser : The sender.
-     * @param {string} channel : The target channel.
-     * @param {Object} action : The IRC action performed.
+     * @param {IrcServer} server The sending IRC server.
+     * @param {IrcUser} fromUser The sender.
+     * @param {string} channel The target channel.
+     * @param {Object} action The IRC action performed.
      * @return {Promise} which is resolved/rejected when the request finishes.
      */
     public async onMessage (req: BridgeRequest, server: IrcServer, fromUser: IrcUser,
@@ -493,6 +495,13 @@ export class IrcHandler {
         if (fromUser.isVirtual) {
             return BridgeRequestErr.ERR_VIRTUAL_USER;
         }
+
+        const mxAction = MatrixAction.fromIrcAction(action);
+        if (!mxAction) {
+            req.log.error("Couldn't map IRC action to matrix action");
+            return BridgeRequestErr.ERR_DROPPED;
+        }
+
         const matrixRooms = await this.ircBridge.getStore().getMatrixRoomsForChannel(server, channel);
 
         if (matrixRooms.length === 0) {
@@ -503,15 +512,11 @@ export class IrcHandler {
             return undefined;
         }
 
-        req.log.info("onMessage: %s from=%s to=%s action=%s",
-            server.domain, fromUser, channel, JSON.stringify(action).substring(0, 80)
+        req.log.info("onMessage: %s from=%s to=%s",
+            server.domain, fromUser, channel
         );
+        req.log.debug("action=%s", JSON.stringify(action).substring(0, 80))
 
-        const mxAction = MatrixAction.fromIrcAction(action);
-        if (!mxAction) {
-            req.log.error("Couldn't map IRC action to matrix action");
-            return BridgeRequestErr.ERR_DROPPED;
-        }
 
         let mapping = null;
         if (this.nickUserIdMapCache.has(`${server.domain}:${channel}`)) {
@@ -563,30 +568,44 @@ export class IrcHandler {
             this.registeredNicks[nickKey] = true;
         }
 
-        const promises = [];
+        const failed = [];
+        req.log.debug(
+            "Relaying in room(s) %s", matrixRooms.map((r) => r.getId()).join(", "),
+        );
         for (const room of matrixRooms) {
-            req.log.info(
-                "Relaying in room %s", room.getId()
-            );
-            promises.push(
-                this.ircBridge.sendMatrixAction(room, virtualMatrixUser, mxAction)
-            );
+            try {
+                await this.ircBridge.sendMatrixAction(room, virtualMatrixUser, mxAction);
+            }
+            catch (ex) {
+                // Check if it was a permission fail.
+                // We can't check the `error` value because it's non-standard, so just assume a M_FORBIDDEN is a
+                // PL related failure.
+                if (ex.data?.errcode === "M_FORBIDDEN") {
+                    req.log.warn(
+                        `User ${virtualMatrixUser.getId()} may not have permission to post in ${room.getId()}`
+                    );
+                    this.roomAccessSyncer.onFailedMessage(req, server, channel);
+                }
+                // Do not fail the operation because a message failed, but keep track of the failures
+                failed.push(Promise.reject(ex));
+            }
         }
-        await Promise.all(promises);
+        // We still want the request to fail
+        await Promise.all(failed);
         return undefined;
     }
 
     /**
      * Called when the AS receives an IRC join event.
-     * @param {IrcServer} server : The sending IRC server.
-     * @param {IrcUser} joiningUser : The user who joined.
-     * @param {string} chan : The channel that was joined.
-     * @param {string} kind : The kind of join (e.g. from a member list if
+     * @param {IrcServer} server The sending IRC server.
+     * @param {IrcUser} joiningUser The user who joined.
+     * @param {string} chan The channel that was joined.
+     * @param {string} kind The kind of join (e.g. from a member list if
      * the bot just connected, or an actual JOIN command)
      * @return {Promise} which is resolved/rejected when the request finishes.
      */
     public async onJoin (req: BridgeRequest, server: IrcServer, joiningUser: IrcUser,
-                         chan: string, kind: string) {
+                         chan: string, kind: "names"|"join"|"nick") {
         if (kind === "names") {
             this.incrementMetric("join.names");
         }
@@ -596,18 +615,19 @@ export class IrcHandler {
 
         this.invalidateNickUserIdMap(server, chan);
 
-        const nick = joiningUser.nick;
-        const syncType: MembershipSyncKind = kind === "names" ? "initial" : "incremental";
-        if (!server.shouldSyncMembershipToMatrix(syncType, chan)) {
-            req.log.info("IRC onJoin(%s) %s to %s - not syncing.", kind, nick, chan);
-            return BridgeRequestErr.ERR_NOT_MAPPED;
-        }
-
-        req.log.info("onJoin(%s) %s to %s", kind, nick, chan);
+        req.log.info("onJoin(%s) %s to %s", kind, joiningUser.nick, chan);
         // if the person joining is a virtual IRC user, do nothing.
         if (joiningUser.isVirtual) {
             return BridgeRequestErr.ERR_VIRTUAL_USER;
         }
+
+        const nick = joiningUser.nick;
+        const syncType: MembershipSyncKind = kind === "names" ? "initial" : "incremental";
+        if (!server.shouldSyncMembershipToMatrix(syncType, chan)) {
+            req.log.debug("IRC onJoin(%s) %s to %s - not syncing.", kind, nick, chan);
+            return BridgeRequestErr.ERR_NOT_MAPPED;
+        }
+
 
         // get virtual matrix user
         const matrixUser = await this.ircBridge.getMatrixUser(joiningUser);
@@ -616,19 +636,13 @@ export class IrcHandler {
             matrixUser.getId()
         );
         const promises = matrixRooms.map(async (room) => {
-            /** If this is a "NAMES" query, we can make use of the joinedMembers call we made
-             * to check if the user already exists in the room. This should save oodles of time.
-             */
-            if (kind === "names" &&
-                this.ircBridge.getMemberListSyncer(server).isRemoteJoinedToRoom(
-                    room.getId(),
-                    matrixUser.getId()
-                )) {
-                req.log.debug("Not joining to %s, already joined.", room.getId());
-                return;
-            }
             req.log.info("Joining room %s and setting presence to online", room.getId());
-            await this.membershipQueue.join(room.getId(), matrixUser.getId(), req);
+            // Only retry if this is not an initial sync to avoid extra load
+            const shouldRetry = syncType === "incremental";
+            // Initial membership should have a longer TTL as it is likely going to be delayed by a large
+            // number of new joiners.
+            const ttl = syncType === "initial" ? MEMBERSHIP_INITIAL_TTL_MS : undefined;
+            await this.membershipQueue.join(room.getId(), matrixUser.getId(), req, shouldRetry, ttl);
             intent.setPresence("online");
         });
         if (matrixRooms.length === 0) {
@@ -720,7 +734,7 @@ export class IrcHandler {
                     // If this fails, we want to fail the operation.
                 }
                 try {
-                    await this.roomAccessSyncer.removePowerLevels(room.getId(), [matrixUserKickee.getId()]);
+                    await this.roomAccessSyncer.setPowerLevel(room.getId(), matrixUserKickee.getId(), null, req);
                 }
                 catch (ex) {
                     // This is non-critical but annoying.
@@ -732,34 +746,34 @@ export class IrcHandler {
 
     /**
      * Called when the AS receives an IRC part event.
-     * @param {IrcServer} server : The sending IRC server.
-     * @param {IrcUser} leavingUser : The user who parted.
-     * @param {string} chan : The channel that was left.
-     * @param {string} kind : The kind of part (e.g. PART, KICK, BAN, QUIT, netsplit, etc)
-     * @return {Promise} which is resolved/rejected when the request finishes.
+     * @param server The sending IRC server.
+     * @param leavingUser The user who parted.
+     * @param chan The channel that was left.
+     * @param kind The kind of part (e.g. PART, KICK, BAN, QUIT, netsplit, etc)
+     * @param reason: The reason why the client parted, if given.
+     * @return A promise which is resolved/rejected when the request finishes.
      */
     public async onPart (req: BridgeRequest, server: IrcServer, leavingUser: IrcUser,
-                         chan: string, kind: string): Promise<BridgeRequestErr|undefined> {
+                         chan: string, kind: string, reason?: string): Promise<BridgeRequestErr|undefined> {
         this.incrementMetric("part");
         this.invalidateNickUserIdMap(server, chan);
         // parts are always incremental (only NAMES are initial)
         if (!server.shouldSyncMembershipToMatrix("incremental", chan)) {
-            req.log.info("Server doesn't mirror parts.");
+            req.log.debug("Server doesn't mirror parts.");
             return undefined;
         }
         const nick = leavingUser.nick;
         req.log.info("onPart(%s) %s to %s", kind, nick, chan);
 
+        // if the person leaving is a virtual IRC user, do nothing. Unless it's a part.
+        if (leavingUser.isVirtual && kind !== "part") {
+            return BridgeRequestErr.ERR_VIRTUAL_USER;
+        }
 
         const matrixRooms = await this.ircBridge.getStore().getMatrixRoomsForChannel(server, chan);
         if (matrixRooms.length === 0) {
             req.log.info("No mapped matrix rooms for IRC channel %s", chan);
             return BridgeRequestErr.ERR_NOT_MAPPED;
-        }
-
-        // if the person leaving is a virtual IRC user, do nothing. Unless it's a part.
-        if (leavingUser.isVirtual && kind !== "part") {
-            return BridgeRequestErr.ERR_VIRTUAL_USER;
         }
 
         let userId: string;
@@ -780,27 +794,34 @@ export class IrcHandler {
         }
 
         // get virtual matrix user
-        req.log.info("Mapped nick %s to %s", nick, userId);
-        const promise = await Promise.all(matrixRooms.map(async (room) => {
+        req.log.info("Mapped nick %s to %s (leaving %s room(s))", nick, userId, matrixRooms.length);
+        await Promise.all(matrixRooms.map(async (room) => {
+            if (leavingUser.isVirtual) {
+                return this.membershipQueue.leave(
+                    room.getId(), userId, req, true, this.ircBridge.appServiceUserId);
+            }
+
+            // Show a reason if the part is not a regular part, or reason text was given.
+            const kindText = kind[0].toUpperCase() + kind.substr(1);
+            if (reason) {
+                reason = `${kindText}: ${reason}`;
+            }
+            else if (kind !== "part") {
+                reason = kindText;
+            }
+
             await this.membershipQueue.leave(
-                room.getId(), userId, req, true, "Client PARTed from channel",
+                room.getId(), userId, req, true, reason,
                 leavingUser.isVirtual ? this.ircBridge.appServiceUserId : undefined);
-            try {
-                await this.roomAccessSyncer.removePowerLevels(room.getId(), [userId]);
-            }
-            catch (ex) {
-                // This is non-critical but annoying.
-                req.log.warn("Failed to remove power levels for leaving user.");
-            }
+            return this.roomAccessSyncer.setPowerLevel(room.getId(), userId, null, req);
         }));
-        await promise;
         return undefined;
     }
 
     /**
      * Called when a user sets a mode in a channel.
      * @param {Request} req The metadata request
-     * @param {IrcServer} server : The sending IRC server.
+     * @param {IrcServer} server The sending IRC server.
      * @param {string} channel The channel that has the given mode.
      * @param {string} mode The mode that the channel is in, e.g. +sabcdef
      * @return {Promise} which is resolved/rejected when the request finishes.
@@ -819,7 +840,7 @@ export class IrcHandler {
     /**
      * Called when channel mode information is received
      * @param {Request} req The metadata request
-     * @param {IrcServer} server : The sending IRC server.
+     * @param {IrcServer} server The sending IRC server.
      * @param {string} channel The channel that has the given mode.
      * @param {string} mode The mode that the channel is in, e.g. +sabcdef
      * @return {Promise} which is resolved/rejected when the request finishes.
@@ -840,6 +861,10 @@ export class IrcHandler {
      */
     public async onMetadata(req: BridgeRequest, client: BridgedClient, msg: string, force: boolean,
                             ircMsg?: IrcMessage) {
+        if (!client.userId) {
+            // Probably the bot
+            return undefined;
+        }
         req.log.info("%s : Sending metadata '%s'", client, msg);
         if (!this.ircBridge.isStartedUp && !force) {
             req.log.info("Suppressing metadata: not started up.");
@@ -848,10 +873,6 @@ export class IrcHandler {
 
         const botUser = new MatrixUser(this.ircBridge.appServiceUserId);
 
-        if (!client.userId) {
-            // Probably the bot
-            return undefined;
-        }
 
         if (ircMsg && ircMsg.command === "err_nosuchnick") {
             const otherNick = ircMsg.args[1];
@@ -942,8 +963,11 @@ export class IrcHandler {
         return metrics;
     }
 
+    public onConfigChanged(config: IrcHandlerConfig) {
+        this.mentionMode = config.mapIrcMentionsToMatrix || "on";
+    }
+
     private invalidateNickUserIdMap(server: IrcServer, channel: string) {
         this.nickUserIdMapCache.delete(`${server.domain}:${channel}`);
     }
 }
-

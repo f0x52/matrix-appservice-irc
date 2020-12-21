@@ -135,7 +135,7 @@ export class AdminRoomHandler {
                 await this.handleWhois(req, args, ircServer, adminRoom, event.sender);
                 break;
             case "!storepass":
-                await this.handleStorePass(req, args, ircServer, adminRoom, event.sender, clientList[0]);
+                await this.handleStorePass(req, args, ircServer, adminRoom, event.sender, clientList);
                 break;
             case "!removepass":
                 await this.handleRemovePass(ircServer, adminRoom, event.sender);
@@ -348,7 +348,7 @@ export class AdminRoomHandler {
     }
 
     private async handleStorePass(req: BridgeRequest, args: string[], server: IrcServer,
-        room: MatrixRoom, userId: string, client: BridgedClient) {
+        room: MatrixRoom, userId: string, clientList: BridgedClient[]) {
         const domain = server.domain;
         let notice;
 
@@ -367,6 +367,7 @@ export class AdminRoomHandler {
                 notice = new MatrixAction(
                     "notice", `Successfully stored password for ${domain}. You will now be reconnected to IRC.`
                 );
+                const client = clientList.find((c) => c.server.domain === server.domain);
                 if (client) {
                     await client.disconnect("iwanttoreconnect", "authenticating", false);
                 }
@@ -408,14 +409,14 @@ export class AdminRoomHandler {
                 "notice", "You are not currently connected to this irc network"
             ));
         }
-        if (client.chanList.length === 0) {
+        if (client.chanList.size === 0) {
             return this.ircBridge.sendMatrixAction(room, this.botUser, new MatrixAction(
                 "notice", "You are connected, but not joined to any channels."
             ));
         }
 
-        let chanList = `You are joined to ${client.chanList.length} rooms: \n\n`;
-        let chanListHTML = `<p> You are joined to <code>${client.chanList.length}</code> rooms: </p><ul>`;
+        let chanList = `You are joined to ${client.chanList.size} rooms: \n\n`;
+        let chanListHTML = `<p>You are joined to <code>${client.chanList.size}</code> rooms:</p><ul>`;
         for (const channel of client.chanList) {
             const rooms = await this.ircBridge.getStore().getMatrixRoomsForChannel(server, channel);
             chanList += `- \`${channel}\` which is bridged to ${rooms.map((r) => r.getId()).join(", ")}`;

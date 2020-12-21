@@ -16,7 +16,7 @@ limitations under the License.
 
 import { Pool } from "pg";
 
-import { MatrixUser, MatrixRoom, RemoteRoom, Entry } from "matrix-appservice-bridge";
+import { MatrixUser, MatrixRoom, RemoteRoom, RoomBridgeStoreEntry as Entry } from "matrix-appservice-bridge";
 import { DataStore, RoomOrigin, ChannelMappings, UserFeatures } from "../DataStore";
 import { IrcRoom } from "../../models/IrcRoom";
 import { IrcClientConfig } from "../../models/IrcClientConfig";
@@ -27,16 +27,22 @@ import Bluebird from "bluebird";
 import { StringCrypto } from "../StringCrypto";
 import { toIrcLowerCase } from "../../irc/formatting";
 import { NeDBDataStore } from "../NedbDataStore";
+import QuickLRU from "quick-lru";
 
 const log = getLogger("PgDatastore");
+
+const FEATURE_CACHE_SIZE = 512;
 
 export class PgDataStore implements DataStore {
     private serverMappings: {[domain: string]: IrcServer} = {};
 
-    public static readonly LATEST_SCHEMA = 4;
+    public static readonly LATEST_SCHEMA = 5;
     private pgPool: Pool;
     private hasEnded = false;
     private cryptoStore?: StringCrypto;
+    private userFeatureCache = new QuickLRU<string, UserFeatures>({
+        maxSize: FEATURE_CACHE_SIZE,
+    });
 
     constructor(private bridgeDomain: string, connectionString: string, pkeyPath?: string, min = 1, max = 4) {
         this.pgPool = new Pool({
@@ -126,8 +132,6 @@ export class PgDataStore implements DataStore {
                 domain: pgEntry.irc_domain,
                 type: pgEntry.type,
             }),
-            matrix_id: pgEntry.room_id,
-            remote_id: "foobar",
             data: {
                 origin: pgEntry.origin,
             },
@@ -185,11 +189,14 @@ export class PgDataStore implements DataStore {
         ])).then((result) => result.rows).map((e) => PgDataStore.pgToRoomEntry(e));
     }
 
-    public async removeRoom(roomId: string, ircDomain: string, ircChannel: string, origin: RoomOrigin): Promise<void> {
-        await this.pgPool.query(
-            "DELETE FROM rooms WHERE room_id = $1 AND irc_domain = $2 AND irc_channel = $3 AND origin = $4",
-            [roomId, ircDomain, ircChannel, origin]
-        );
+    public async removeRoom(roomId: string, ircDomain: string, ircChannel: string, origin?: RoomOrigin): Promise<void> {
+        let statement = "DELETE FROM rooms WHERE room_id = $1 AND irc_domain = $2 AND irc_channel = $3";
+        let params = [roomId, ircDomain, ircChannel];
+        if (origin) {
+            statement += " AND origin = $4";
+            params = params.concat(origin);
+        }
+        await this.pgPool.query(statement, params);
     }
 
     public async getIrcChannelsForRoomId(roomId: string): Promise<IrcRoom[]> {
@@ -363,7 +370,7 @@ export class PgDataStore implements DataStore {
 
     public async getIpv6Counter(): Promise<number> {
         const res = await this.pgPool.query("SELECT count FROM ipv6_counter");
-        return res ? res.rows[0].count : 0;
+        return res ? parseInt(res.rows[0].count, 10) : 0;
     }
 
     public async setIpv6Counter(counter: number): Promise<void> {
@@ -464,14 +471,14 @@ export class PgDataStore implements DataStore {
     }
 
     public async getUserFeatures(userId: string): Promise<UserFeatures> {
-        const pgRes = (
-            await this.pgPool.query("SELECT features FROM user_features WHERE user_id = $1",
-            [userId])
-        );
-        if (pgRes.rowCount === 0) {
-            return {};
+        const existing = this.userFeatureCache.get(userId);
+        if (existing) {
+            return existing;
         }
-        return pgRes.rows[0].features || {};
+        const pgRes = await this.pgPool.query("SELECT features FROM user_features WHERE user_id = $1", [userId]);
+        const features = (pgRes.rows[0] || {});
+        this.userFeatureCache.set(userId, features);
+        return features;
     }
 
     public async storeUserFeatures(userId: string, features: UserFeatures): Promise<void> {
@@ -511,12 +518,20 @@ export class PgDataStore implements DataStore {
             [username, domain]
         );
         if (res.rowCount === 0) {
-            return;
+            return undefined;
         }
         else if (res.rowCount > 1) {
             log.error("getMatrixUserByUsername returned %s results for %s on %s", res.rowCount, username, domain);
         }
         return new MatrixUser(res.rows[0].user_id, res.rows[0].data);
+    }
+
+    public async getCountForUsernamePrefix(domain: string, usernamePrefix: string): Promise<number> {
+        const res = await this.pgPool.query("SELECT COUNT(*) FROM client_config " +
+            "WHERE domain = $2 AND config->>'username' LIKE $1 || '%'",
+        [usernamePrefix, domain]);
+        const count = parseInt(res.rows[0].count, 10);
+        return count;
     }
 
     public async roomUpgradeOnRoomMigrated(oldRoomId: string, newRoomId: string) {
@@ -531,7 +546,7 @@ export class PgDataStore implements DataStore {
         await this.pgPool.query(statement, [userId, Date.now()]);
     }
 
-    public async getLastSeenTimeForUsers(): Promise<{ user_id: string, ts: number }[]> {
+    public async getLastSeenTimeForUsers(): Promise<{ user_id: string; ts: number }[]> {
         const res = await this.pgPool.query(`SELECT * FROM last_seen`);
         return res.rows;
     }

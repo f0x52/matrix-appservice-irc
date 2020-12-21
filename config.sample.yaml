@@ -139,6 +139,8 @@ ircService:
         enabled: true
         # The nickname to give the AS bot.
         nick: "MatrixBot"
+        # The username to give to the AS bot. Defaults to "matrixbot"
+        username: "matrixbot"
         # The password to give to NickServ or IRC Server for this nick. Optional.
         # password: "helloworld"
         #
@@ -260,6 +262,16 @@ ircService:
             ircToMatrix:
               initial: false
               incremental: false
+
+        # Should the bridge ignore users which are not considered active on the bridge
+        # during startup
+        ignoreIdleUsersOnStartup:
+          enabled: true
+          # How many hours can a user be considered idle for before they are considered
+          # ignoreable
+          idleForHours: 720
+          # A regex which will exclude matching MXIDs from this check.
+          exclude: "foobar"
 
       mappings:
         # 1:many mappings from IRC channels to room IDs on this IRC server.
@@ -477,16 +489,17 @@ ircService:
     eventCacheSize: 4096
 
   ircHandler:
-    # How many /leave requests can be ongoing at a time.
-    # This is used to stem the flow of requests in case of a mass quit/leave, which might
-    # slow down the homeserver.
-    leaveConcurrency: 10
     # Should we attempt to match an IRC side mention (nickaname match)
     # with the nickname's owner's matrixId, if we are bridging them?
     # "on" - Defaults to enabled, users can choose to disable.
     # "off" - Defaults to disabled, users can choose to enable.
     # "force-off" - Disabled, cannot be enabled.
     mapIrcMentionsToMatrix: "on" # This can be "on", "off", "force-off".
+
+    # When handling lots of mode changes, wait this long before setting a power level
+    # event in order to batch together changes
+    # powerLevelGracePeriod: 1000
+
 # Options here are generally only applicable to large-scale bridges and may have
 # consequences greater than other options in this configuration file.
 advanced:

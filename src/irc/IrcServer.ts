@@ -27,9 +27,11 @@ export type MembershipSyncKind = "incremental"|"initial";
  * Represents a single IRC server from config.yaml
  */
 export class IrcServer {
-    private addresses: string[];
-    private groupIdValid: boolean;
-    private excludedUsers: { regex: RegExp; kickReason?: string }[];
+    private addresses: string[] = [];
+    private groupIdValid = false;
+    private excludedUsers: { regex: RegExp; kickReason?: string }[] = [];
+    private idleUsersStartupExcludeRegex?: RegExp;
+    private enforceReconnectInterval = true;
     /**
      * Construct a new IRC Server.
      * @constructor
@@ -43,40 +45,7 @@ export class IrcServer {
      */
     constructor(public domain: string, public config: IrcServerConfig,
                 private homeserverDomain: string, private expiryTimeSeconds: number = 0) {
-        // This ensures that legacy mappings still work, but we prod the user to update.
-        const stringMappings = Object.entries(config.mappings || {}).filter(([, data]) => {
-            return Array.isArray(data);
-        }) as unknown as [string, string[]][];
-
-        if (stringMappings.length) {
-            log.warn("** The IrcServer.mappings config schema has changed, allowing legacy format for now. **");
-            log.warn("See https://github.com/matrix-org/matrix-appservice-irc/blob/master/CHANGELOG.md for details");
-            for (const [channelId, roomIds] of stringMappings) {
-                config.mappings[channelId] = { roomIds: roomIds }
-            }
-        }
-
-        this.addresses = config.additionalAddresses || [];
-        this.addresses.push(domain);
-        this.excludedUsers = config.excludedUsers.map((excluded) => {
-            return {
-                ...excluded,
-                regex: new RegExp(excluded.regex)
-            }
-        })
-
-        if (this.config.dynamicChannels.groupId !== undefined &&
-            this.config.dynamicChannels.groupId.trim() !== "") {
-            this.groupIdValid = GROUP_ID_REGEX.test(this.config.dynamicChannels.groupId);
-            if (!this.groupIdValid) {
-                log.warn(
-    `${domain} has an incorrectly configured groupId for dynamicChannels and will not set groups.`
-                );
-            }
-        }
-        else {
-            this.groupIdValid = false;
-        }
+        this.reconfigure(config, expiryTimeSeconds);
     }
 
     /**
@@ -249,8 +218,12 @@ export class IrcServer {
         return this.config.ircClients.idleTimeout;
     }
 
+    public toggleReconnectInterval(enable: boolean) {
+        this.enforceReconnectInterval = enable;
+    }
+
     public getReconnectIntervalMs() {
-        return this.config.ircClients.reconnectIntervalMs;
+        return this.enforceReconnectInterval ? this.config.ircClients.reconnectIntervalMs : 0;
     }
 
     public getConcurrentReconnectLimit() {
@@ -273,9 +246,9 @@ export class IrcServer {
         return this.config.botConfig.nick;
     }
 
-    public createBotIrcClientConfig(username: string) {
+    public createBotIrcClientConfig() {
         return IrcClientConfig.newConfig(
-            null, this.domain, this.config.botConfig.nick, username,
+            null, this.domain, this.config.botConfig.nick, this.config.botConfig.username,
             this.config.botConfig.password
         );
     }
@@ -304,6 +277,18 @@ export class IrcServer {
         return this.excludedUsers.find((exclusion) => {
             return exclusion.regex.exec(userId) !== null;
         });
+    }
+
+    public get ignoreIdleUsersOnStartup() {
+        return this.config.membershipLists.ignoreIdleOnStartup?.enabled;
+    }
+
+    public get ignoreIdleUsersOnStartupAfterMs() {
+        return (this.config.membershipLists.ignoreIdleOnStartup?.idleForHours || 0) * 1000 * 60 * 60;
+    }
+
+    public get ignoreIdleUsersOnStartupExcludeRegex() {
+        return this.idleUsersStartupExcludeRegex;
     }
 
     public canJoinRooms(userId: string) {
@@ -535,6 +520,7 @@ export class IrcServer {
             },
             botConfig: {
                 nick: "appservicebot",
+                username: "matrixbot",
                 joinChannelsIfNoUsers: true,
                 enabled: true
             },
@@ -589,6 +575,50 @@ export class IrcServer {
                 rooms: []
             }
         }
+    }
+
+    public reconfigure(config: IrcServerConfig, expiryTimeSeconds = 0) {
+        log.info(`Reconfiguring ${this.domain}`);
+        this.config = config;
+        this.expiryTimeSeconds = expiryTimeSeconds;
+        // This ensures that legacy mappings still work, but we prod the user to update.
+        const stringMappings = Object.entries(config.mappings || {}).filter(([, data]) => {
+            return Array.isArray(data);
+        }) as unknown as [string, string[]][];
+
+        if (stringMappings.length) {
+            log.warn("** The IrcServer.mappings config schema has changed, allowing legacy format for now. **");
+            log.warn("See https://github.com/matrix-org/matrix-appservice-irc/blob/master/CHANGELOG.md for details");
+            for (const [channelId, roomIds] of stringMappings) {
+                config.mappings[channelId] = { roomIds: roomIds }
+            }
+        }
+
+        this.addresses = config.additionalAddresses || [];
+        this.addresses.push(this.domain);
+        this.excludedUsers = config.excludedUsers.map((excluded) => {
+            return {
+                ...excluded,
+                regex: new RegExp(excluded.regex)
+            }
+        });
+
+        if (config.dynamicChannels.groupId !== undefined &&
+            config.dynamicChannels.groupId.trim() !== "") {
+            this.groupIdValid = GROUP_ID_REGEX.test(config.dynamicChannels.groupId);
+            if (!this.groupIdValid) {
+                log.warn(
+    `${this.domain} has an incorrectly configured groupId for dynamicChannels and will not set groups.`
+                );
+            }
+        }
+        else {
+            this.groupIdValid = false;
+        }
+        this.idleUsersStartupExcludeRegex =
+            this.config.membershipLists.ignoreIdleOnStartup?.exclude ?
+            new RegExp(this.config.membershipLists.ignoreIdleOnStartup.exclude)
+            : undefined;
     }
 
     private static templateToRegex(template: string, literalVars: {[key: string]: string},
@@ -671,6 +701,7 @@ export interface IrcServerConfig {
         joinChannelsIfNoUsers: boolean;
         enabled: boolean;
         password?: string;
+        username: string;
     };
     privateMessages: {
         enabled: boolean;
@@ -705,6 +736,11 @@ export interface IrcServerConfig {
     membershipLists: {
         enabled: boolean;
         floodDelayMs: number;
+        ignoreIdleOnStartup?: {
+            enabled: true;
+            idleForHours: number;
+            exclude: string;
+        };
         global: {
             ircToMatrix: {
                 initial: boolean;

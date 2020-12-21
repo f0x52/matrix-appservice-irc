@@ -1,6 +1,6 @@
 import { IrcBridge } from "./IrcBridge";
 import { BridgeRequest, BridgeRequestErr } from "../models/BridgeRequest";
-import { MatrixUser, MatrixRoom, StateLookup } from "matrix-appservice-bridge";
+import { MatrixUser, MatrixRoom, StateLookup, StateLookupEvent, MembershipQueue } from "matrix-appservice-bridge";
 import { IrcUser } from "../models/IrcUser";
 import { MatrixAction, MatrixMessageEvent } from "../models/MatrixAction";
 import { IrcRoom } from "../models/IrcRoom";
@@ -9,7 +9,6 @@ import { IrcServer } from "../irc/IrcServer";
 import { IrcAction } from "../models/IrcAction";
 import { toIrcLowerCase } from "../irc/formatting";
 import { AdminRoomHandler } from "./AdminRoomHandler";
-import { MembershipQueue } from "../util/MembershipQueue";
 import { trackChannelAndCreateRoom } from "./RoomCreation";
 
 async function reqHandler(req: BridgeRequest, promise: PromiseLike<unknown>) {
@@ -32,20 +31,28 @@ const DEFAULT_EVENT_CACHE_SIZE = 4096;
 /* Length of the source text in a formatted reply message */
 const REPLY_SOURCE_MAX_LENGTH = 32;
 
-interface MatrixEventInvite {
+export interface MatrixEventInvite {
     room_id: string;
     state_key: string;
     sender: string;
     content: {
         is_direct?: boolean;
+        membership: "invite";
     };
+    type: string;
+    event_id: string;
 }
 
-interface MatrixEventKick {
+export interface MatrixEventKick {
     room_id: string;
+    sender: string;
+    state_key: string;
     content: {
         reason?: string;
+        membership: "leave";
     };
+    type: string;
+    event_id: string;
 }
 
 interface MatrixSimpleMessage {
@@ -55,18 +62,23 @@ interface MatrixSimpleMessage {
     };
 }
 
-interface MatrixEventJoin {
-    _frontier: boolean;
-    _injected: boolean;
-    room_id: string;
-    content?: {
-        displayname?: string;
-    };
-}
-
 interface MatrixEventLeave {
     room_id: string;
-    _injected: boolean;
+    event_id: string;
+    _injected?: boolean;
+}
+
+export interface OnMemberEventData {
+    _frontier?: boolean;
+    _injected?: boolean;
+    room_id: string;
+    state_key: string;
+    type: string;
+    event_id: string;
+    content: {
+        displayname?: string;
+        membership: string;
+    };
 }
 
 export class MatrixHandler {
@@ -104,7 +116,7 @@ export class MatrixHandler {
      * @param {MatrixUser} inviter : The user who invited the bot.
      */
     private async handleAdminRoomInvite(req: BridgeRequest, event: {room_id: string}, inviter: MatrixUser) {
-        req.log.info("Handling invite from user directed to bot.");
+        req.log.info(`Handling invite from ${inviter.getId()} directed to bot.`);
         // Real MX user inviting BOT to a private chat
         const mxRoom = new MatrixRoom(event.room_id);
         await this.membershipQueue.join(event.room_id, undefined, req, true);
@@ -123,7 +135,7 @@ export class MatrixHandler {
             }
         }
         catch (err) {
-            req.log.info(`Not a plumbed room: Error retrieving m.room.plumbing (${err.data.error})`);
+            req.log.debug(`Not a plumbed room: Error retrieving m.room.plumbing (${err.data.error})`);
         }
 
         // clobber any previous admin room ID
@@ -205,7 +217,7 @@ export class MatrixHandler {
             );
             return;
         }
-        req.log.error("This room isn't a 1:1 chat!");
+        req.log.warn(`Room ${event.room_id} is not a 1:1 chat`);
         await intent.kick(event.room_id, invitedUser.getId(), "Group chat not supported.");
     }
 
@@ -222,10 +234,12 @@ export class MatrixHandler {
             // First call begins tracking, subsequent calls do nothing
             await this.memberTracker.trackRoom(adminRoom.getId());
 
-            members = this.memberTracker.getState(
+            members = (this.memberTracker.getState(
                 adminRoom.getId(),
-                'm.room.member'
-            ).filter((m) => m.content.membership && m.content.membership === "join");
+                "m.room.member",
+            ) as Array<StateLookupEvent>).filter((m) =>
+                (m.content as {membership: string}).membership === "join"
+            );
         }
         else {
             req.log.warn('Member tracker not running');
@@ -267,9 +281,11 @@ export class MatrixHandler {
             return "You are not connected to any networks.";
         }
 
+        const intent = this.ircBridge.getAppServiceBridge().getIntent();
+
         for (let i = 0; i < clients.length; i++) {
             const bridgedClient = clients[i];
-            if (bridgedClient.chanList.length === 0) {
+            if (bridgedClient.chanList.size === 0) {
                 req.log.info(
                     `Bridged client for ${userId} is not in any channels ` +
                     `on ${bridgedClient.server.domain}`
@@ -279,7 +295,7 @@ export class MatrixHandler {
                 // Get all rooms that the bridgedClient is in
                 const uniqueRoomIds = new Set<string>();
                 (await Promise.all(
-                    bridgedClient.chanList.map(
+                    [...bridgedClient.chanList].map(
                         (channel) => {
                             return this.ircBridge.getStore().getMatrixRoomsForChannel(
                                 bridgedClient.server, channel
@@ -289,16 +305,28 @@ export class MatrixHandler {
                     // flatten to a single unqiue set
                 )).forEach((rSet) => rSet.forEach((r) => uniqueRoomIds.add(r.getId())));
 
-                await Promise.all([...uniqueRoomIds].map(async (roomId) => {
+                // Don't wait for these to complete
+                Promise.all([...uniqueRoomIds].map(async (roomId) => {
+                    let state: {membership?: string};
                     try {
-                        await this.membershipQueue.leave(
-                            roomId,
-                            userId,
-                            req,
-                            false,
-                            reason,
-                            this.ircBridge.appServiceUserId
-                        );
+                        state = await intent.getStateEvent(roomId, "m.room.member", userId);
+                    }
+                    catch (ex) {
+                        state = {};
+                    }
+                    try {
+                        // Only kick if the state is join or leave, ignore all else.
+                        // https://github.com/matrix-org/matrix-appservice-irc/issues/1163
+                        if (state.membership === "join" || state.membership === "invite" ) {
+                            await this.membershipQueue.leave(
+                                roomId,
+                                userId,
+                                req,
+                                false,
+                                reason,
+                                this.ircBridge.appServiceUserId
+                            );
+                        }
                     }
                     catch (err) {
                         req.log.error(err);
@@ -324,9 +352,14 @@ export class MatrixHandler {
      * Called when the AS receives a new Matrix invite/join/leave event.
      * @param {Object} event : The Matrix member event.
      */
-    private async _onMemberEvent(req: BridgeRequest, event: unknown) {
+    private async _onMemberEvent(req: BridgeRequest, event: OnMemberEventData) {
         if (!this.memberTracker) {
-            const matrixClient = this.ircBridge.getAppServiceBridge().getClientFactory().getClientAs();
+            const clientFactory = this.ircBridge.getAppServiceBridge().getClientFactory();
+            if (!clientFactory) {
+                // Client factory isn't ready...yet.
+                return;
+            }
+            const matrixClient = clientFactory.getClientAs();
 
             this.memberTracker = new StateLookup({
                 client : matrixClient,
@@ -385,7 +418,8 @@ export class MatrixHandler {
         * [6] MX  --invite--> BOT  (invite to private room to allow bot to bridge) - Ignore.
         * [7] MX  --invite--> MX   (matrix user inviting another matrix user)
         */
-        req.log.info("onInvite: %s", JSON.stringify(event));
+        req.log.info("onInvite: from=%s to=%s rm=%s id=%s", event.sender,
+            event.state_key, event.room_id, event.event_id);
         this._onMemberEvent(req, event);
 
         // mark this room as being processed in case we simultaneously get
@@ -438,9 +472,9 @@ export class MatrixHandler {
         return null;
     }
 
-    private async _onJoin(req: BridgeRequest, event: MatrixEventJoin, user: MatrixUser):
+    private async _onJoin(req: BridgeRequest, event: OnMemberEventData, user: MatrixUser):
     Promise<BridgeRequestErr|null> {
-        req.log.info("onJoin: %s", JSON.stringify(event));
+        req.log.info("onJoin: usr=%s rm=%s id=%s", event.state_key, event.room_id, event.event_id);
         this._onMemberEvent(req, event);
         // membershiplists injects leave events when syncing initial membership
         // lists. We know if this event is injected because this flag is set.
@@ -481,7 +515,7 @@ export class MatrixHandler {
         // for each room (which may be on different servers)
         ircRooms.forEach((room) => {
             if (room.server.claimsUserId(user.getId())) {
-                req.log.info("%s is a virtual user (claimed by %s)",
+                req.log.debug("%s is a virtual user (claimed by %s)",
                     user.getId(), room.server.domain);
                 return;
             }
@@ -514,7 +548,10 @@ export class MatrixHandler {
                 }
 
                 // Check for a displayname change and update nick accordingly.
-                if (event.content && event.content.displayname !== bridgedClient.displayName) {
+                if (event.content &&
+                    event.content.displayname &&
+                    event.content.displayname !== bridgedClient.displayName) {
+                    bridgedClient.displayName = event.content.displayname;
                     // Changing the nick requires that:
                     // - the server allows nick changes
                     // - the nick is not custom
@@ -524,14 +561,20 @@ export class MatrixHandler {
                     if (config && room.server.allowsNickChanges() &&
                         !config.getDesiredNick()
                     ) {
-                        try {
-                            const newNick = room.server.getNick(
-                                bridgedClient.userId, event.content.displayname
-                            );
-                            bridgedClient.changeNick(newNick, false);
-                        }
-                        catch (e) {
-                            req.log.warn(`Didn't change nick on the IRC side: ${e}`);
+                        const intent = this.ircBridge.getAppServiceBridge().getIntent();
+                        // Check that the /profile matches the displayname.
+                        const userProfile = await intent.getProfileInfo(event.state_key, "displayname");
+                        // We only want to update the nickname if the profile contains the displayname
+                        if (userProfile.displayname === event.content.displayname) {
+                            try {
+                                const newNick = room.server.getNick(
+                                    bridgedClient.userId, event.content.displayname
+                                );
+                                bridgedClient.changeNick(newNick, false);
+                            }
+                            catch (e) {
+                                req.log.warn(`Didn't change nick on the IRC side: ${e}`);
+                            }
                         }
                     }
                 }
@@ -552,8 +595,8 @@ export class MatrixHandler {
 
     private async _onKick(req: BridgeRequest, event: MatrixEventKick, kicker: MatrixUser, kickee: MatrixUser) {
         req.log.info(
-            "onKick %s is kicking/banning %s from %s",
-            kicker.getId(), kickee.getId(), event.room_id
+            "onKick %s is kicking/banning %s from %s (reason: %s)",
+            kicker.getId(), kickee.getId(), event.room_id, event.content.reason || "none"
         );
         this._onMemberEvent(req, event);
 
@@ -607,7 +650,7 @@ export class MatrixHandler {
             const kickerClient = this.ircBridge.getIrcUserFromCache(server, kicker.getId());
             if (!kickerClient) {
                 // well this is awkward.. whine about it and bail.
-                req.log.error(
+                req.log.warn(
                     "%s has no client instance to send kick from. Cannot kick.",
                     kicker.getId()
                 );
@@ -650,7 +693,7 @@ export class MatrixHandler {
 
     private async _onLeave(req: BridgeRequest, event: MatrixEventLeave, user: MatrixUser):
     Promise<BridgeRequestErr|null> {
-        req.log.info("onLeave: %s", JSON.stringify(event));
+        req.log.info("onLeave: usr=%s rm=%s id=%s", user.getId(), event.room_id, event.event_id);
         // membershiplists injects leave events when syncing initial membership
         // lists. We know if this event is injected because this flag is set.
         const syncKind = event._injected ? "initial" : "incremental";
@@ -729,10 +772,12 @@ export class MatrixHandler {
         * Matrix --> Matrix (Admin room)
         */
 
-        req.log.info("%s usr=%s rm=%s body=%s",
-            event.type, event.sender, event.room_id,
-            (event.content.body ? event.content.body.substring(0, 20) : "")
+        req.log.info("onMessage: %s usr=%s rm=%s id=%s",
+            event.type, event.sender, event.room_id, event.event_id
         );
+        if (event.content.body) {
+            req.log.debug("Message body: %s", event.content.body);
+        }
         const mxAction = MatrixAction.fromEvent(
             event, this.mediaUrl
         );
@@ -746,7 +791,7 @@ export class MatrixHandler {
         const servers = this.ircBridge.getServers();
         for (let i = 0; i < servers.length; i++) {
             if (servers[i].claimsUserId(event.sender)) {
-                req.log.info("%s is a virtual user (claimed by %s)",
+                req.log.debug("%s is a virtual user (claimed by %s)",
                     event.sender, servers[i].domain);
                 return BridgeRequestErr.ERR_VIRTUAL_USER;
             }
@@ -783,7 +828,7 @@ export class MatrixHandler {
             // could be an Admin room, so check.
             const adminRoom = await this.ircBridge.getStore().getAdminRoomById(event.room_id);
             if (!adminRoom) {
-                req.log.info("No mapped channels.");
+                req.log.debug("No mapped channels.");
                 return BridgeRequestErr.ERR_DROPPED;
             }
             // process admin request
@@ -807,7 +852,7 @@ export class MatrixHandler {
 
         ircRooms.forEach((ircRoom) => {
             if (ircRoom.server.claimsUserId(event.sender)) {
-                req.log.info("%s is a virtual user (claimed by %s)",
+                req.log.debug("%s is a virtual user (claimed by %s)",
                     event.sender, ircRoom.server.domain);
                 return;
             }
@@ -839,7 +884,7 @@ export class MatrixHandler {
                         displayName = res.displayname;
                     }
                     catch (err) {
-                        req.log.error("Failed to get display name: %s", err);
+                        req.log.warn("Failed to get display name: %s", err);
                         // this is non-fatal, continue.
                     }
                     bridgedClient = await this.ircBridge.getBridgedClient(
@@ -965,7 +1010,7 @@ export class MatrixHandler {
             await this.ircBridge.sendIrcAction(ircRoom, ircClient, bigFileIrcAction);
         }
         else {
-            req.log.warn("Sending truncated message");
+            req.log.debug("Sending truncated message");
             // Modify the event to become a truncated version of the original
             //  the truncation limits the number of lines sent to lineLimit.
 
@@ -1159,7 +1204,7 @@ export class MatrixHandler {
 
     // EXPORTS
 
-    public onMemberEvent(req: BridgeRequest, event: unknown) {
+    public onMemberEvent(req: BridgeRequest, event: OnMemberEventData) {
         return reqHandler(req, this._onMemberEvent(req, event));
     }
 
@@ -1167,11 +1212,11 @@ export class MatrixHandler {
         return reqHandler(req, this._onInvite(req, event, inviter, invitee));
     }
 
-    public onJoin(req: BridgeRequest, event: MatrixEventJoin, user: MatrixUser) {
+    public onJoin(req: BridgeRequest, event: OnMemberEventData, user: MatrixUser) {
         return reqHandler(req, this._onJoin(req, event, user));
     }
 
-    public onLeave(req: BridgeRequest, event: { room_id: string; _injected: boolean }, user: MatrixUser) {
+    public onLeave(req: BridgeRequest, event: MatrixEventLeave, user: MatrixUser) {
         return reqHandler(req, this._onLeave(req, event, user));
     }
 
