@@ -6,6 +6,7 @@ const path = require("path");
 
 const REG_PATH = "appservice-registration-irc.yaml";
 let bridge;
+
 new Cli({
     registrationPath: REG_PATH,
     enableRegistration: true,

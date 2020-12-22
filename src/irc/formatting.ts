@@ -1,5 +1,8 @@
 import sanitizeHtml from "sanitize-html";
 import he from "he";
+import cheerio from "cheerio";
+import { MatrixAction } from "../models/MatrixAction";
+import { IrcBridge } from "../bridge/IrcBridge";
 
 const htmlNamesToColorCodes: {[color: string]: string[]} = {
     white:     ['00', '0'],
@@ -155,9 +158,34 @@ export function stripIrcFormatting(text: string) {
         .replace(/[\x0F\x02\x16\x1F\x1D]/g, ''); // styles too
 }
 
-export function htmlToIrc(html?: string): string|null {
+const mxidFromMatrixTo = /(?:https:\/\/matrix\.to\/#\/@)(.+)/;
+function replacePills(html: string, getIrcUser: Function): string|null {
+    const $ = cheerio.load(html, null, false);
+    $("a").toArray().forEach((a) => {
+        const match = $(a).attr("href")?.match(mxidFromMatrixTo);
+        if (match && match[1]) {
+            const mxid = `@${match[1]}`;
+            const bridgedClient = getIrcUser(mxid);
+            if (bridgedClient !== undefined) {
+                $(a).replaceWith(bridgedClient._nick);
+            }
+        }
+    })
+    return $.root().html();
+}
+
+const matrixToRegex = /<a href="https:\/\/matrix\.to\//;
+export function containsPill(html: string): boolean {
+    return matrixToRegex.test(html);
+}
+
+export function htmlToIrc(html?: string, getIrcUser?: Function): string|null {
     if (!html) {
         return null;
+    }
+
+    if (getIrcUser && containsPill(html)) {
+        html = replacePills(html, getIrcUser) ?? html;
     }
 
     // Sanitize the HTML first to allow us to regex parse this (which also does

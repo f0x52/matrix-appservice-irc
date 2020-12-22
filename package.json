@@ -10,6 +10,7 @@
   "scripts": {
     "prepare": "npm run build",
     "build": "tsc --project ./tsconfig.json",
+    "dev": "tsc --project ./tsconfig.json --watch",
     "test": "BLUEBIRD_DEBUG=1 node --max_old_space_size=3072 node_modules/jasmine/bin/jasmine.js --stop-on-failure=true",
     "lint": "eslint -c .eslintrc --max-warnings 0 src/**/*.ts",
     "check": "npm test && npm run lint",
@@ -28,11 +29,13 @@
   "dependencies": {
     "@sentry/node": "^5.27.1",
     "bluebird": "^3.1.1",
+    "cheerio": "^1.0.0-rc.5",
     "escape-string-regexp": "^2.0.0",
     "extend": "^2.0.0",
     "he": "^1.1.1",
     "iconv": "^2.3.4",
     "irc": "github:matrix-org/node-irc#9028c2197c216dd8e6fc2cb3cc07ce2d6bf741a7",
+    "is-utf8": "^0.2.1",
     "js-yaml": "^3.14.0",
     "logform": "^2.2.0",
     "matrix-appservice": "^0.7.1",

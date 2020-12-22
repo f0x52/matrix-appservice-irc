@@ -17,6 +17,7 @@ limitations under the License.
 
 import * as ircFormatting from "../irc/formatting";
 const log = require("../logging").get("IrcAction");
+import { IrcBridge } from "../bridge/IrcBridge";
 
 import { MatrixAction } from "./MatrixAction";
 
@@ -33,7 +34,7 @@ export class IrcAction {
         }
     }
 
-    public static fromMatrixAction(matrixAction: MatrixAction): IrcAction|null {
+    public static fromMatrixAction(matrixAction: MatrixAction, getIrcUser?: Function): IrcAction|null {
         switch (matrixAction.type) {
             case "message":
             case "emote":
@@ -41,8 +42,9 @@ export class IrcAction {
                 if (matrixAction.text === null) {
                     break;
                 }
+
                 if (matrixAction.htmlText) {
-                    const text = ircFormatting.htmlToIrc(matrixAction.htmlText);
+                    const text = ircFormatting.htmlToIrc(matrixAction.htmlText, getIrcUser);
                     const ircText = text ?? matrixAction.text; // fallback if needed.
                     if (ircText === null) {
                         throw Error("ircText is null");

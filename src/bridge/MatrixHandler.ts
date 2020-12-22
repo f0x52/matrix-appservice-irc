@@ -7,7 +7,7 @@ import { IrcRoom } from "../models/IrcRoom";
 import { BridgedClient } from "../irc/BridgedClient";
 import { IrcServer } from "../irc/IrcServer";
 import { IrcAction } from "../models/IrcAction";
-import { toIrcLowerCase } from "../irc/formatting";
+import { stripIrcFormatting, toIrcLowerCase, containsPill } from "../irc/formatting";
 import { AdminRoomHandler } from "./AdminRoomHandler";
 import { trackChannelAndCreateRoom } from "./RoomCreation";
 
@@ -781,7 +781,8 @@ export class MatrixHandler {
         const mxAction = MatrixAction.fromEvent(
             event, this.mediaUrl
         );
-        const ircAction = IrcAction.fromMatrixAction(mxAction);
+
+        let ircAction = IrcAction.fromMatrixAction(mxAction);
         if (ircAction === null) {
             req.log.info("IrcAction couldn't determine an action type.");
             return BridgeRequestErr.ERR_DROPPED;
@@ -868,6 +869,22 @@ export class MatrixHandler {
                         otherMatrixRoomIdsToServers[mxRoom.getId()] = ircRoom.server;
                     });
                 })());
+            }
+
+            if (mxAction.htmlText && containsPill(mxAction.htmlText)) {
+                const getIrcUser = (mxid: string): BridgedClient|undefined => {
+                    return this.ircBridge.getIrcUserFromCache(ircRoom.server, mxid);
+                };
+
+                const newIrcAction = IrcAction.fromMatrixAction(mxAction, getIrcUser);
+                if (newIrcAction !== null) {
+                    ircAction = newIrcAction;
+                }
+            }
+
+            if (ircAction === null) {
+                // This Will Literally Never Happen Fuck Off TypeScript
+                return;
             }
 
             // If we already have a cached client then yay, but if we
