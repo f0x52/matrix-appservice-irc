@@ -18,6 +18,7 @@ const NICK_USERID_CACHE_MAX = 512;
 const PM_POWERLEVEL_MATRIXUSER = 10;
 const PM_POWERLEVEL_IRCUSER = 100;
 const MEMBERSHIP_INITIAL_TTL_MS = 30 * 60 * 1000; // 30 mins
+const PM_ROOM_CREATION_RETRIES = 3; // How often to retry to create a PM room, if it fails?
 
 export type MatrixMembership = "join"|"invite"|"leave"|"ban";
 
@@ -113,12 +114,14 @@ export class IrcHandler {
                 sender: userId,
                 membership: "leave"
             };
-            this.roomIdToPrivateMember[roomId] = priv;
 
             // query room state to see if the user is actually joined.
             log.debug("Querying PM room state (%s) between %s and %s",
                 roomId, userId, virtUserId);
-            priv = (await intent.getStateEvent(roomId, "m.room.member", userId));
+            const result = (await intent.getStateEvent(roomId, "m.room.member", userId, true));
+            if (result) {
+                priv = result;
+            }
             this.roomIdToPrivateMember[roomId] = priv;
         }
 
@@ -137,50 +140,70 @@ export class IrcHandler {
     }
 
     /**
-     * Create a new matrix PM room for an IRC user  with nick `fromUserNick` and another
+     * Create a new matrix PM room for an IRC user with nick `fromUserNick` and another
      * matrix user with user ID `toUserId`.
-     * @param {string} toUserId The user ID of the recipient.
-     * @param {string} fromUserId The user ID of the sender.
-     * @param {string} fromUserNick The nick of the sender.
-     * @param {IrcServer} server The sending IRC server.
-     * @return {Promise} which is resolved when the PM room has been created.
+     * @param req An associated request for contextual logging.
+     * @param toUserId The user ID of the recipient.
+     * @param fromUserId The user ID of the sender.
+     * @param fromUserNick The nick of the sender.
+     * @param server The sending IRC server.
+     * @return A Promise which is resolved when the PM room has been created.
      */
-    private async createPmRoom (toUserId: string, fromUserId: string, fromUserNick: string, server: IrcServer) {
-        const users: {[userId: string]: number} = { };
-        users[toUserId] = PM_POWERLEVEL_MATRIXUSER;
-        users[fromUserId] = PM_POWERLEVEL_IRCUSER;
-        const response = await this.ircBridge.getAppServiceBridge().getIntent(
-            fromUserId
-        ).createRoom({
-            createAsClient: true,
-            options: {
-                name: (fromUserNick + " (PM on " + server.domain + ")"),
-                visibility: "private",
-                // We deliberately set our own power levels below.
-                // preset: "trusted_private_chat",
-                invite: [toUserId],
-                creation_content: {
-                    "m.federate": server.shouldFederatePMs()
-                },
-                is_direct: true,
-                initial_state: [{
-                    content: {
-                        users,
-                        events: {
-                            "m.room.avatar": 10,
-                            "m.room.name": 10,
-                            "m.room.canonical_alias": 100,
-                            "m.room.history_visibility": 100,
-                            "m.room.power_levels": 100,
-                            "m.room.encryption": 100
+    private async createPmRoom(
+        req: BridgeRequest,
+        toUserId: string,
+        fromUserId: string,
+        fromUserNick: string,
+        server: IrcServer
+    ): Promise<MatrixRoom> {
+        let remainingReties = PM_ROOM_CREATION_RETRIES;
+        let response;
+        do {
+            try {
+                response = await this.ircBridge.getAppServiceBridge().getIntent(
+                    fromUserId
+                ).createRoom({
+                    createAsClient: true,
+                    options: {
+                        name: (fromUserNick + " (PM on " + server.domain + ")"),
+                        visibility: "private",
+                        // We deliberately set our own power levels below.
+                        // preset: "trusted_private_chat",
+                        creation_content: {
+                            "m.federate": server.shouldFederatePMs()
                         },
-                        invite: 100,
-                    },
-                    type: "m.room.power_levels",
-                    state_key: "",
-                }],
+                        is_direct: true,
+                        initial_state: [{
+                            content: {
+                                users: {
+                                    [toUserId]: PM_POWERLEVEL_MATRIXUSER,
+                                    [fromUserId]: PM_POWERLEVEL_IRCUSER,
+                                },
+                                events: {
+                                    "m.room.avatar": 10,
+                                    "m.room.name": 10,
+                                    "m.room.canonical_alias": 100,
+                                    "m.room.history_visibility": 100,
+                                    "m.room.power_levels": 100,
+                                    "m.room.encryption": 100
+                                },
+                                invite: 100,
+                            },
+                            type: "m.room.power_levels",
+                            state_key: "",
+                        }],
+                    }
+                });
             }
-        });
+            catch (error) {
+                req.log.error(error);
+                req.log.warn(`Failed creating a PM room with ${toUserId}. Remaining reties: ${remainingReties}`);
+            }
+            remainingReties--;
+        } while (!response && remainingReties > 0);
+        if (!response) {
+            throw Error(`Failed creating a PM room with ${toUserId}. Giving up.`);
+        }
         const pmRoom = new MatrixRoom(response.room_id);
         const ircRoom = new IrcRoom(server, fromUserNick);
 
@@ -278,26 +301,24 @@ export class IrcHandler {
             if (!pmRoom) {
                 req.log.info("Creating a PM room with %s", bridgedIrcClient.userId);
                 this.pmRoomPromises[pmRoomPromiseId] = this.createPmRoom(
-                    bridgedIrcClient.userId, virtualMatrixUser.getId(), fromUser.nick, server
+                    req, bridgedIrcClient.userId, virtualMatrixUser.getId(), fromUser.nick, server
                 );
                 pmRoom = await this.pmRoomPromises[pmRoomPromiseId];
             }
         }
-        else {
-            // make sure that the matrix user is still in the room
-            try {
-                await this.ensureMatrixUserJoined(
-                    pmRoom.getId(), bridgedIrcClient.userId, virtualMatrixUser.getId(), req.log
-                );
-            }
-            catch (err) {
-                // We still want to send the message into the room even if we can't check -
-                // maybe the room state API has blown up.
-                req.log.error(
-                    "Failed to ensure matrix user %s was joined to the existing PM room %s : %s",
-                    bridgedIrcClient.userId, pmRoom.getId(), err
-                );
-            }
+        // make sure that the matrix user is (still) in the room
+        try {
+            await this.ensureMatrixUserJoined(
+                pmRoom.getId(), bridgedIrcClient.userId, virtualMatrixUser.getId(), req.log
+            );
+        }
+        catch (err) {
+            // We still want to send the message into the room even if we can't check -
+            // maybe the room state API has blown up.
+            req.log.error(
+                "Failed to ensure matrix user %s was joined to the PM room %s : %s",
+                bridgedIrcClient.userId, pmRoom.getId(), err
+            );
         }
 
         req.log.info("Relaying PM in room %s", pmRoom.getId());
@@ -409,7 +430,7 @@ export class IrcHandler {
                     item.req.log.error(`Error storing room ${matrixRoom.getId()} (${err.message})`);
                 }
             );
-            }
+        }
         );
         try {
             await Promise.all(promises);
@@ -802,7 +823,7 @@ export class IrcHandler {
             }
 
             // Show a reason if the part is not a regular part, or reason text was given.
-            const kindText = kind[0].toUpperCase() + kind.substr(1);
+            const kindText = kind[0].toUpperCase() + kind.substring(1);
             if (reason) {
                 reason = `${kindText}: ${reason}`;
             }
@@ -873,8 +894,7 @@ export class IrcHandler {
 
         const botUser = new MatrixUser(this.ircBridge.appServiceUserId);
 
-
-        if (ircMsg && ircMsg.command === "err_nosuchnick") {
+        if (ircMsg?.command === "err_nosuchnick") {
             const otherNick = ircMsg.args[1];
             const otherUser = new MatrixUser(client.server.getUserIdFromNick(otherNick));
             const room = await this.ircBridge.getStore().getMatrixPmRoom(client.userId, otherUser.userId);
@@ -919,6 +939,11 @@ export class IrcHandler {
         }
         else {
             adminRoom = fetchedAdminRoom;
+        }
+
+
+        if (ircMsg?.command === "err_cannotsendtochan") {
+            msg = `Message could not be sent to ${ircMsg.args[1]}`;
         }
 
         const notice = new MatrixAction("notice", msg);

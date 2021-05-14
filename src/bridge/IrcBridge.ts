@@ -31,15 +31,18 @@ import {
     AgeCounters,
     EphemeralEvent,
     MembershipQueue,
+    BridgeInfoStateSyncer,
 } from "matrix-appservice-bridge";
 import { IrcAction } from "../models/IrcAction";
 import { DataStore } from "../datastore/DataStore";
 import { MatrixAction, MatrixMessageEvent } from "../models/MatrixAction";
 import { BridgeConfig } from "../config/BridgeConfig";
-import { BridgeStateSyncer } from "./BridgeStateSyncer";
 import { Registry } from "prom-client";
 import { spawnMetricsWorker } from "../workers/MetricsWorker";
 import { getBridgeVersion } from "../util/PackageInfo";
+import { globalAgent as gAHTTP } from "http";
+import { globalAgent as gAHTTPS } from "https";
+import { RoomConfig } from "./RoomConfig";
 
 const log = getLogger("IrcBridge");
 const DEFAULT_PORT = 8090;
@@ -62,6 +65,7 @@ export class IrcBridge {
     public readonly ircHandler: IrcHandler;
     public readonly publicitySyncer: PublicitySyncer;
     public readonly activityTracker: MatrixActivityTracker|null = null;
+    public readonly roomConfigs: RoomConfig;
     private clientPool!: ClientPool; // This gets defined in the `run` function
     private ircServers: IrcServer[] = [];
     private memberListSyncers: {[domain: string]: MemberListSyncer} = {};
@@ -78,7 +82,10 @@ export class IrcBridge {
     }|null = null;
     private membershipCache: MembershipCache;
     private readonly membershipQueue: MembershipQueue;
-    private bridgeStateSyncer!: BridgeStateSyncer;
+    private bridgeStateSyncer?: BridgeInfoStateSyncer<{
+        channel: string;
+        networkId: string;
+    }>;
 
     constructor(public readonly config: BridgeConfig, private registration: AppServiceRegistration) {
         // TODO: Don't log this to stdout
@@ -201,6 +208,7 @@ export class IrcBridge {
             homeserverToken,
             httpMaxSizeBytes: (this.config.advanced || { }).maxTxnSize || TXN_SIZE_DEFAULT,
         });
+        this.roomConfigs = new RoomConfig(this.bridge, this.config.ircService.perRoomConfig);
     }
 
     public async onConfigChanged(newConfig: BridgeConfig) {
@@ -209,8 +217,8 @@ export class IrcBridge {
 
         if (oldConfig.advanced.maxHttpSockets !== newConfig.advanced.maxHttpSockets) {
             const maxSockets = (newConfig.advanced || {maxHttpSockets: 1000}).maxHttpSockets;
-            require("http").globalAgent.maxSockets = maxSockets;
-            require("https").globalAgent.maxSockets = maxSockets;
+            gAHTTP.maxSockets = maxSockets;
+            gAHTTPS.maxSockets = maxSockets;
             log.info(`Adjusted max sockets to ${maxSockets}`);
         }
 
@@ -229,6 +237,8 @@ export class IrcBridge {
 
         this.ircHandler.onConfigChanged(newConfig.ircHandler || {});
         this.config.ircHandler = newConfig.ircHandler;
+        this.config.ircService.permissions = newConfig.ircService.permissions;
+        this.roomConfigs.config = newConfig.ircService.perRoomConfig;
 
         const hasLoggingChanged = JSON.stringify(oldConfig.ircService.logging)
             !== JSON.stringify(newConfig.ircService.logging);
@@ -485,6 +495,24 @@ export class IrcBridge {
         }
     }
 
+    public createInfoMapping(channel: string, networkId: string) {
+        const network = this.getServer(networkId);
+        return {
+            protocol: {
+                id: 'irc',
+                displayname: 'IRC',
+            },
+            network: {
+                id: networkId,
+                displayname: network?.getReadableName(),
+                avatar_url: network?.getIcon() as `mxc://`,
+            },
+            channel: {
+                id: channel,
+            }
+        }
+    }
+
     public async run(port: number|null) {
         const dbConfig = this.config.database;
         // cli port, then config port, then default port
@@ -530,17 +558,6 @@ export class IrcBridge {
 
         await this.dataStore.removeConfigMappings();
 
-        if (this.config.ircService.debugApi.enabled) {
-            this.debugApi = new DebugApi(
-                this,
-                this.config.ircService.debugApi.port,
-                this.ircServers,
-                this.clientPool,
-                this.registration.getAppServiceToken() as string
-            );
-            this.debugApi.run();
-        }
-
         if (this.activityTracker) {
             log.info("Restoring last active times from DB");
             const users = await this.dataStore.getLastSeenTimeForUsers();
@@ -567,6 +584,17 @@ export class IrcBridge {
         }
 
         this.clientPool = new ClientPool(this, this.dataStore);
+
+        if (this.config.ircService.debugApi.enabled) {
+            this.debugApi = new DebugApi(
+                this,
+                this.config.ircService.debugApi.port,
+                this.ircServers,
+                this.clientPool,
+                this.registration.getAppServiceToken() as string
+            );
+            this.debugApi.run();
+        }
 
         if (this.ircServers.length === 0) {
             throw Error("No IRC servers specified.");
@@ -596,9 +624,13 @@ export class IrcBridge {
         await this.fetchJoinedRooms();
 
         if (this.config.ircService.bridgeInfoState?.enabled) {
-            this.bridgeStateSyncer = new BridgeStateSyncer(this.dataStore, this.bridge, this);
+            this.bridgeStateSyncer = new BridgeInfoStateSyncer(this.bridge, {
+                bridgeName: 'org.matrix.appservice-irc',
+                getMapping: async (roomId, { channel, networkId }) => this.createInfoMapping(channel, networkId),
+            });
             if (this.config.ircService.bridgeInfoState.initial) {
-                this.bridgeStateSyncer.beginSync().then(() => {
+                const mappings = await this.dataStore.getAllChannelMappings();
+                this.bridgeStateSyncer.initialSync(mappings).then(() => {
                     log.info("Bridge state syncing completed");
                 }).catch((err) => {
                     log.error("Bridge state syncing resulted in an error:", err);
@@ -770,6 +802,14 @@ export class IrcBridge {
 
     public async sendMatrixAction(room: MatrixRoom, from: MatrixUser, action: MatrixAction): Promise<void> {
         const intent = this.bridge.getIntent(from.userId);
+        const extraContent: Record<string, unknown> = {};
+        if (action.replyEvent) {
+            extraContent["m.relates_to"] = {
+                "m.in_reply_to": {
+                    event_id: action.replyEvent,
+                }
+            }
+        }
         if (action.msgType) {
             if (action.htmlText) {
                 await intent.sendMessage(room.getId(), {
@@ -778,13 +818,15 @@ export class IrcBridge {
                         action.text || action.htmlText.replace(/(<([^>]+)>)/ig, "") // strip html tags
                     ),
                     format: "org.matrix.custom.html",
-                    formatted_body: action.htmlText
+                    formatted_body: action.htmlText,
+                    ...extraContent,
                 });
             }
             else {
                 await intent.sendMessage(room.getId(), {
                     msgtype: action.msgType,
-                    body: action.text
+                    body: action.text,
+                    ...extraContent,
                 });
             }
             return;
@@ -903,6 +945,9 @@ export class IrcBridge {
         }
         else if (event.type === "m.room.topic" && event.state_key === "") {
             await this.matrixHandler.onMessage(request, event as unknown as MatrixMessageEvent);
+        }
+        else if (event.type === RoomConfig.STATE_EVENT_TYPE && typeof event.state_key === 'string') {
+            this.roomConfigs.invalidateConfig(event.room_id, event.state_key);
         }
         else if (event.type === "m.room.member" && event.state_key) {
             if (!event.content || !event.content.membership) {
@@ -1134,21 +1179,6 @@ export class IrcBridge {
         return new IrcUser(ircInfo.server, ircInfo.nick, true);
     }
 
-    public async trackChannel(server: IrcServer, channel: string, key?: string): Promise<IrcRoom> {
-        if (!server.isBotEnabled()) {
-            log.info("trackChannel: Bot is disabled.");
-            return new IrcRoom(server, channel);
-        }
-        const client = await this.getBotClient(server);
-        try {
-            return await client.joinChannel(channel, key);
-        }
-        catch (ex) {
-            log.error(ex);
-            throw Error("Failed to join channel");
-        }
-    }
-
     public connectToIrcNetworks() {
         return promiseutil.allSettled(this.ircServers.map((server) =>
             Bluebird.cast(this.clientPool.loginToServer(server))
@@ -1186,7 +1216,7 @@ export class IrcBridge {
         await client.leaveChannel(ircRoom.channel);
     }
 
-    public sendIrcAction(ircRoom: IrcRoom, bridgedClient: BridgedClient, action: IrcAction) {
+    public async sendIrcAction(ircRoom: IrcRoom, bridgedClient: BridgedClient, action: IrcAction) {
         log.info(
             "Sending IRC message in %s as %s (connected=%s)",
             ircRoom.channel, bridgedClient.nick, Boolean(bridgedClient.status === BridgedClientStatus.CONNECTED)
@@ -1247,7 +1277,7 @@ export class IrcBridge {
             }
         });
         const bridgingEvent = stateEvents.find((ev: {type: string}) => ev.type === "m.room.bridging");
-        const bridgeInfoEvent = stateEvents.find((ev: {type: string}) => ev.type === BridgeStateSyncer.EventType);
+        const bridgeInfoEvent = stateEvents.find((ev: {type: string}) => ev.type === BridgeInfoStateSyncer.EventType);
         if (bridgingEvent) {
             try {
                 await this.bridge.getIntent().sendStateEvent(

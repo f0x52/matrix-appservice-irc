@@ -1,6 +1,6 @@
 ## How to use the Dockerfile
 
-Ensure you have docker installed. The version this was tested
+Ensure you have Docker installed. The version this was tested
 with is `18.06.1-ce`.
 
 Create `./dockerdata`
@@ -39,4 +39,4 @@ If you are storing passwords for users, you should also run:
 openssl genpkey -out ./dockerdata/passkey.pem -outform PEM -algorithm RSA -pkeyopt rsa_keygen_bits:2048
 ```
 
-You can now run your shiny new image using `docker run -p 9999:9999 -v $PWD/dockerdata:/app/data`.
+You can now run your shiny new image using `docker run --publish 9999:9999 --volume $PWD/dockerdata:/app/data`.

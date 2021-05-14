@@ -113,7 +113,7 @@ properties:
                     enableReload:
                         type: "boolean"
                     roomLimit:
-                        type: "number" 
+                        type: "number"
             passwordEncryptionKeyPath:
                 type: "string"
             matrixHandler:
@@ -134,6 +134,11 @@ properties:
                         type: "boolean"
                     initial:
                         type: "boolean"
+            permissions:
+                type: "object"
+                additionalProperties:
+                    type: "string"
+                    enum: ["admin"]
             servers:
                 type: "object"
                 # all properties must follow the following
@@ -359,6 +364,9 @@ properties:
                                     minimum: 0
                                 allowNickChanges:
                                     type: "boolean"
+                                realnameFormat:
+                                    type: "string"
+                                    enum: ["mxid","reverse-mxid"]
                                 ipv6:
                                     type: "object"
                                     properties:
@@ -371,6 +379,19 @@ properties:
                                     type: "integer"
                                 userModes:
                                     type: "string"
+                                pingTimeoutMs:
+                                    type: "integer"
+                                pingRateMs:
+                                    type: "integer"
+                                kickOn:
+                                    type: "object"
+                                    properties:
+                                        channelJoinFailure:
+                                            type: "boolean"
+                                        ircConnectionFailure:
+                                            type: "boolean"
+                                        userQuit:
+                                            type: "boolean"
                         excludeUsers:
                             type: "array"
                             properties:

@@ -58,7 +58,13 @@ export class DebugApi {
     }
 
     private onRequest(req: IncomingMessage, response: ServerResponse) {
-        const reqPath = req.url!.split("?");
+        if (!req.url) {
+            response.writeHead(500, { "Content-Type": "text/plain" });
+            response.write("Your request reached our server without a URL.");
+            response.end();
+            throw Error('URL is required but was falsy.');
+        }
+        const reqPath = req.url.split("?");
         const path = reqPath[0];
         const query = querystring.parse(reqPath[1]);
         log.debug(req.method + " " + path);
@@ -87,7 +93,8 @@ export class DebugApi {
         else if (req.method === "GET" && path === "/inspectUsers") {
             this.inspectUsers(query["regex"] as string, response);
             return;
-        } else if (req.method === "GET" && path === "/version") {
+        }
+        else if (req.method === "GET" && path === "/version") {
             response.writeHead(200, {"Content-Type": "text/plain"});
             response.write(getBridgeVersion());
             response.end();
@@ -149,7 +156,7 @@ export class DebugApi {
                 response.write(r);
                 response.end();
             }, (err: Error) => {
-                log.error(err.stack!);
+                log.error(err.stack);
                 response.writeHead(500, {"Content-Type": "text/plain"});
                 response.write(err + "\n");
                 response.end();
@@ -182,7 +189,7 @@ export class DebugApi {
                 response.write(r + "\n");
                 response.end();
             }, (err: Error) => {
-                log.error(err.stack!);
+                log.error(err.stack);
                 response.writeHead(500, {"Content-Type": "text/plain"});
                 response.write(err + "\n");
                 response.end();
@@ -286,7 +293,7 @@ export class DebugApi {
         const result: { error: string[]; stages: string[] } = {
             error: [], // string|[string] containing a fatal error or minor errors.
             stages: [] // stages completed for removing the room. It's possible it might only
-                       // half complete, and we should make that obvious.
+            // half complete, and we should make that obvious.
         };
         const body = (await this.wrapJsonReq(req, response)) as {
             room_id: string;
@@ -324,12 +331,7 @@ export class DebugApi {
             return;
         }
 
-        log.warn(
-    `Requested deletion of portal room alias ${roomId} through debug API
-    Domain: ${domain}
-    Channel: ${channel}
-    Leave Notice: ${notice}
-    Remove Alias: ${removeAlias}`);
+        log.info(`Killing room ${roomId} (${domain} ${channel}) removeAlias: ${removeAlias} notice: ${notice}`);
 
         // Find room
         const room = await store.getRoom(
@@ -361,10 +363,10 @@ export class DebugApi {
         if (notice) {
             try {
                 await this.ircBridge.getAppServiceBridge().getIntent().sendMessage(roomId,
-                {
-                    msgtype: "m.notice",
-                    body: `This room has been unbridged from ${channel} (${server.getReadableName()})`
-                });
+                    {
+                        msgtype: "m.notice",
+                        body: `This room has been unbridged from ${channel} (${server.getReadableName()})`
+                    });
                 result.stages.push("Left notice in room");
             }
             catch (e) {
@@ -445,6 +447,7 @@ export class DebugApi {
         }
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     private wrapJsonReq (req: IncomingMessage, response: ServerResponse): Bluebird<unknown> {
         let body = "";
         req.on("data", (chunk) => { body += chunk; });

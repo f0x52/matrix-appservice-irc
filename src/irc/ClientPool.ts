@@ -237,7 +237,7 @@ export class ClientPool {
             }
             // If we failed to connect
             log.error("Couldn't connect virtual user %s (%s) to %s : %s",
-                    ircClientConfig.getDesiredNick(), userId, server.domain, JSON.stringify(err));
+                ircClientConfig.getDesiredNick(), userId, server.domain, JSON.stringify(err));
             throw err;
         }
     }
@@ -669,6 +669,9 @@ export class ClientPool {
         const userId = bridgedClient.userId;
         if (!userId || bridgedClient.isBot) {
             return; // the bot itself can get these join errors
+        }
+        if (!bridgedClient.server.config.ircClients.kickOn.channelJoinFailure) {
+            return; // The bridge is configured not to kick on failure.
         }
         // TODO: this is a bit evil, no one in their right mind would expect
         // the client pool to be kicking matrix users from a room :(

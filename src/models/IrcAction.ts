@@ -16,10 +16,9 @@ limitations under the License.
 */
 
 import * as ircFormatting from "../irc/formatting";
-const log = require("../logging").get("IrcAction");
-import { IrcBridge } from "../bridge/IrcBridge";
-
 import { MatrixAction } from "./MatrixAction";
+import logging from "../logging";
+const log = logging("MatrixAction");
 
 const ACTION_TYPES = ["message", "emote", "topic", "notice"];
 type IrcActionType = "message"|"emote"|"topic"|"notice";
@@ -44,8 +43,9 @@ export class IrcAction {
                 }
 
                 if (matrixAction.htmlText) {
-                    const text = ircFormatting.htmlToIrc(matrixAction.htmlText, getIrcUser);
-                    const ircText = text ?? matrixAction.text; // fallback if needed.
+                    const ircText = ircFormatting.htmlToIrc(matrixAction.htmlText)
+                        ?? ircFormatting.markdownCodeToIrc(matrixAction.text)
+                        ?? matrixAction.text; // fallback if needed.
                     if (ircText === null) {
                         throw Error("ircText is null");
                     }
@@ -64,7 +64,7 @@ export class IrcAction {
             case "audio":
                 return new IrcAction(
                     "emote", "uploaded an audio file: " + matrixAction.text, matrixAction.ts
-            );
+                );
             case "file":
                 return new IrcAction(
                     "message", "" + matrixAction.text, matrixAction.ts

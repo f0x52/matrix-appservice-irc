@@ -219,7 +219,7 @@ export class BridgedClient extends EventEmitter {
 
         try {
             const nameInfo = await this.identGenerator.getIrcNames(
-                this.clientConfig, this.matrixUser
+                this.clientConfig, this.server, this.matrixUser,
             );
             const ipv6Prefix = this.server.getIpv6Prefix();
             if (ipv6Prefix) {
@@ -292,7 +292,7 @@ export class BridgedClient extends EventEmitter {
             });
             connInst.client.addListener("error", (err: IrcMessage) => {
                 // Errors we MUST notify the user about, regardless of the bridge's admin room config.
-                const ERRORS_TO_FORCE = ["err_nononreg", "err_nosuchnick"];
+                const ERRORS_TO_FORCE = ["err_nononreg", "err_nosuchnick", "err_cannotsendtochan"];
                 if (!err || !err.command || connInst.dead) {
                     return;
                 }
@@ -327,10 +327,15 @@ export class BridgedClient extends EventEmitter {
             "Reconnected %s@%s", this.nick, this.server.domain
         );
         this.log.info("Rejoining %s channels", this._chanList.size);
-        // This needs to be synchronous
+        // This needs to be synchronous to avoid spamming the IRCD
+        // with lots of reconnects.
         for (const channel of this._chanList) {
-            // XXX: Why do we not catch these?
-            await this.joinChannel(channel);
+            try {
+                await this.joinChannel(channel);
+            }
+            catch (ex) {
+                this.log.error(`Failed to rejoin channel: ${ex}`);
+            }
         }
         this.log.info("Rejoined channels");
     }
@@ -478,7 +483,7 @@ export class BridgedClient extends EventEmitter {
 
         const c = this.state.client;
 
-        return new Promise((resolve) => {
+        return new Promise<void>((resolve) => {
             this.log.debug("Kicking %s from channel %s", nick, channel);
             c.send("KICK", channel, nick, reason);
             resolve(); // wait for some response? Is there even one?
@@ -544,8 +549,8 @@ export class BridgedClient extends EventEmitter {
             const idle = whois.idle ? `${whois.idle} seconds idle` : "";
             const chans = (
                 (whois.channels && whois.channels.length) > 0 ?
-                `On channels: ${JSON.stringify(whois.channels)}` :
-                ""
+                    `On channels: ${JSON.stringify(whois.channels)}` :
+                    ""
             );
 
             const info = `${whois.user}@${whois.host}
@@ -729,7 +734,7 @@ export class BridgedClient extends EventEmitter {
                 if (throwOnInvalid) {
                     throw new Error(`Nick '${nick}' is too long. (Max: ${maxNickLen})`);
                 }
-                n = n.substr(0, maxNickLen);
+                n = n.substring(0, maxNickLen);
             }
         }
 
@@ -740,8 +745,8 @@ export class BridgedClient extends EventEmitter {
         this.lastActionTs = Date.now();
         if (this.server.shouldSyncMembershipToIrc("initial") ||
             this.isBot) {
-                // If we are mirroring matrix membership OR
-                // we are a bot, do not disconnect.
+            // If we are mirroring matrix membership OR
+            // we are a bot, do not disconnect.
             return;
         }
         const idleTimeout = this.server.getIdleTimeout();

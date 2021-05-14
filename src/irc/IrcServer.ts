@@ -23,6 +23,126 @@ const GROUP_ID_REGEX = /^\+\S+:\S+$/
 
 export type MembershipSyncKind = "incremental"|"initial";
 
+export interface IrcServerConfig {
+    // These are determined to be always defined or possibly undefined
+    // by the existence of the keys in IrcServer.DEFAULT_CONFIG.
+    name?: string;
+    port?: number;
+    icon?: string;
+    ca?: string;
+    networkId?: string;
+    ssl?: boolean;
+    sslselfsign?: boolean;
+    sasl?: boolean;
+    password?: string;
+    allowExpiredCerts?: boolean;
+    additionalAddresses?: string[];
+    dynamicChannels: {
+        enabled: boolean;
+        published: boolean;
+        createAlias: boolean;
+        joinRule: "public"|"invite";
+        federate: boolean;
+        aliasTemplate: string;
+        whitelist: string[];
+        exclude: string[];
+        roomVersion?: string;
+        groupId?: string;
+    };
+    quitDebounce: {
+        enabled: boolean;
+        quitsPerSecond: number;
+        delayMinMs: number;
+        delayMaxMs: number;
+    };
+    mappings: {
+        [channel: string]: {
+            roomIds: string[];
+            key?: string;
+        };
+    };
+    modePowerMap?: {[mode: string]: number};
+    sendConnectionMessages: boolean;
+    botConfig: {
+        nick: string;
+        joinChannelsIfNoUsers: boolean;
+        enabled: boolean;
+        password?: string;
+        username: string;
+    };
+    privateMessages: {
+        enabled: boolean;
+        exclude: string[];
+        federate: boolean;
+    };
+    matrixClients: {
+        userTemplate: string;
+        displayName: string;
+        joinAttempts: number;
+    };
+    ircClients: {
+        nickTemplate: string;
+        maxClients: number;
+        idleTimeout: number;
+        reconnectIntervalMs: number;
+        concurrentReconnectLimit: number;
+        allowNickChanges: boolean;
+        ipv6: {
+            only: boolean;
+            prefix?: string;
+        };
+        lineLimit: number;
+        userModes?: string;
+        realnameFormat?: "mxid"|"reverse-mxid";
+        pingTimeoutMs: number;
+        pingRateMs: number;
+        kickOn: {
+            channelJoinFailure: boolean;
+            ircConnectionFailure: boolean;
+            userQuit: boolean;
+        }
+    };
+    excludedUsers: Array<
+        {
+            regex: string;
+            kickReason?: string;
+        }
+    >;
+    membershipLists: {
+        enabled: boolean;
+        floodDelayMs: number;
+        ignoreIdleOnStartup?: {
+            enabled: true;
+            idleForHours: number;
+            exclude: string;
+        };
+        global: {
+            ircToMatrix: {
+                initial: boolean;
+                incremental: boolean;
+            };
+            matrixToIrc: {
+                initial: boolean;
+                incremental: boolean;
+            };
+        };
+        channels: {
+            channel: string;
+            ircToMatrix: {
+                initial: boolean;
+                incremental: boolean;
+            };
+        }[];
+        rooms: {
+            room: string;
+            matrixToIrc: {
+                initial: boolean;
+                incremental: boolean;
+            };
+        }[];
+    };
+}
+
 /*
  * Represents a single IRC server from config.yaml
  */
@@ -67,6 +187,14 @@ export class IrcServer {
     }
 
     /**
+     * Get an icon to represent the network
+     * The icon URL, if configured.
+     */
+    public getIcon(): string|undefined {
+        return this.config.icon;
+    }
+
+    /**
      * Return a randomised server domain from the default and additional addresses.
      * @return {string}
      */
@@ -95,23 +223,14 @@ export class IrcServer {
     }
 
     /**
-     * Get the minimum number of ms to debounce before bridging a QUIT to Matrix
-     * during a detected net-split. If the user rejoins a channel before bridging
-     * the quit to a leave, the leave will not be sent.
-     * @return {number}
+     * Get a random interval to delay a quits for when debouncing. Will be between
+     * `delayMinMs` and `delayMaxMs`
      */
-    public getQuitDebounceDelayMinMs() {
-        return this.config.quitDebounce.delayMinMs;
-    }
-
-    /**
-     * Get the maximum number of ms to debounce before bridging a QUIT to Matrix
-     * during a detected net-split. If a leave is bridged, it will occur at a
-     * random time between delayMinMs (see above) delayMaxMs.
-     * @return {number}
-     */
-    public getQuitDebounceDelayMaxMs() {
-        return this.config.quitDebounce.delayMaxMs;
+    public getQuitDebounceDelay(): number {
+        const { delayMaxMs, delayMinMs } = this.config.quitDebounce;
+        return delayMinMs + (
+            delayMaxMs - delayMinMs
+        ) * Math.random();
     }
 
     /**
@@ -157,6 +276,10 @@ export class IrcServer {
 
     public getUserModes() {
         return this.config.ircClients.userModes || "";
+    }
+
+    public getRealNameFormat(): "mxid"|"reverse-mxid" {
+        return this.config.ircClients.realnameFormat || "mxid";
     }
 
     public getJoinRule() {
@@ -289,6 +412,23 @@ export class IrcServer {
 
     public get ignoreIdleUsersOnStartupExcludeRegex() {
         return this.idleUsersStartupExcludeRegex;
+    }
+
+    /**
+     * The amount of time to allow for inactivty on the connection, before considering the connection
+     * dead. This usually happens if the IRCd doesn't ping us.
+     */
+    public get pingTimeout() {
+        return this.config.ircClients.pingTimeoutMs;
+    }
+
+    /**
+     * The rate at which to send pings to the IRCd if the client is being quiet for a while.
+     * Whilst the IRCd *should* be sending pings to us to keep the connection alive, it appears
+     * that sometimes they don't get around to it and end up ping timing us out.
+    */
+    public get pingRateMs() {
+        return this.config.ircClients.pingRateMs;
     }
 
     public canJoinRooms(userId: string) {
@@ -556,7 +696,14 @@ export class IrcServer {
                 ipv6: {
                     only: false
                 },
-                lineLimit: 3
+                lineLimit: 3,
+                pingTimeoutMs: 1000 * 60 * 10,
+                pingRateMs: 1000 * 60,
+                kickOn: {
+                    ircConnectionFailure: true,
+                    channelJoinFailure: true,
+                    userQuit: true
+                }
             },
             membershipLists: {
                 enabled: false,
@@ -608,7 +755,7 @@ export class IrcServer {
             this.groupIdValid = GROUP_ID_REGEX.test(config.dynamicChannels.groupId);
             if (!this.groupIdValid) {
                 log.warn(
-    `${this.domain} has an incorrectly configured groupId for dynamicChannels and will not set groups.`
+                    `${this.domain} has an incorrectly configured groupId for dynamicChannels and will not set groups.`
                 );
             }
         }
@@ -617,8 +764,8 @@ export class IrcServer {
         }
         this.idleUsersStartupExcludeRegex =
             this.config.membershipLists.ignoreIdleOnStartup?.exclude ?
-            new RegExp(this.config.membershipLists.ignoreIdleOnStartup.exclude)
-            : undefined;
+                new RegExp(this.config.membershipLists.ignoreIdleOnStartup.exclude)
+                : undefined;
     }
 
     private static templateToRegex(template: string, literalVars: {[key: string]: string},
@@ -654,116 +801,4 @@ export class IrcServer {
         // https://developer.mozilla.org/en/docs/Web/JavaScript/Guide/Regular_Expressions
         return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     }
-}
-
-export interface IrcServerConfig {
-    // These are determined to be always defined or possibly undefined
-    // by the existence of the keys in IrcServer.DEFAULT_CONFIG.
-    name?: string;
-    port?: number;
-    icon?: string;
-    ca?: string;
-    networkId?: string;
-    ssl?: boolean;
-    sslselfsign?: boolean;
-    sasl?: boolean;
-    password?: string;
-    allowExpiredCerts?: boolean;
-    additionalAddresses?: string[];
-    dynamicChannels: {
-        enabled: boolean;
-        published: boolean;
-        createAlias: boolean;
-        joinRule: "public"|"invite";
-        federate: boolean;
-        aliasTemplate: string;
-        whitelist: string[];
-        exclude: string[];
-        roomVersion?: string;
-        groupId?: string;
-    };
-    quitDebounce: {
-        enabled: boolean;
-        quitsPerSecond: number;
-        delayMinMs: number;
-        delayMaxMs: number;
-    };
-    mappings: {
-        [channel: string]: {
-            roomIds: string[];
-            key?: string;
-        };
-    };
-    modePowerMap?: {[mode: string]: number};
-    sendConnectionMessages: boolean;
-    botConfig: {
-        nick: string;
-        joinChannelsIfNoUsers: boolean;
-        enabled: boolean;
-        password?: string;
-        username: string;
-    };
-    privateMessages: {
-        enabled: boolean;
-        exclude: string[];
-        federate: boolean;
-    };
-    matrixClients: {
-        userTemplate: string;
-        displayName: string;
-        joinAttempts: number;
-    };
-    ircClients: {
-        nickTemplate: string;
-        maxClients: number;
-        idleTimeout: number;
-        reconnectIntervalMs: number;
-        concurrentReconnectLimit: number;
-        allowNickChanges: boolean;
-        ipv6: {
-            only: boolean;
-            prefix?: string;
-        };
-        lineLimit: number;
-        userModes?: string;
-    };
-    excludedUsers: Array<
-        {
-            regex: string;
-            kickReason?: string;
-        }
-    >;
-    membershipLists: {
-        enabled: boolean;
-        floodDelayMs: number;
-        ignoreIdleOnStartup?: {
-            enabled: true;
-            idleForHours: number;
-            exclude: string;
-        };
-        global: {
-            ircToMatrix: {
-                initial: boolean;
-                incremental: boolean;
-            };
-            matrixToIrc: {
-                initial: boolean;
-                incremental: boolean;
-            };
-        };
-        channels: {
-            channel: string;
-            ircToMatrix: {
-                initial: boolean;
-                incremental: boolean;
-            };
-        }[];
-        rooms: {
-            room: string;
-            matrixToIrc: {
-                initial: boolean;
-                incremental: boolean;
-            };
-        }[];
-    };
 }

@@ -1,4 +1,115 @@
- 0.23.0 (2020-12-01)
+0.26.0 (2021-05-13)
+===================
+
+No significant changes.
+
+
+0.26.0-rc2 (2021-05-10)
+========================
+
+Internal Changes
+----------------
+
+- For NPM 7 to properly fetch the irc dependency, we switch to a git+https:// url. Before it defaulted to SSH which needs some authentication. ([\#1311](https://github.com/matrix-org/matrix-appservice-irc/issues/1311))
+
+
+0.26.0-rc1 (2021-05-07)
+========================
+
+Features
+--------
+
+- Allow changing nickname in any room ([\#1217](https://github.com/matrix-org/matrix-appservice-irc/issues/1217))
+- The bridge will now retry creating a room for a PM if the initial attempt fails. ([\#1282](https://github.com/matrix-org/matrix-appservice-irc/issues/1282))
+- Decouple invite from the creation of a PM room ([\#1290](https://github.com/matrix-org/matrix-appservice-irc/issues/1290))
+- Add new `kickOn` config option to disable kicking Matrix users under certain conditions ([\#1294](https://github.com/matrix-org/matrix-appservice-irc/issues/1294))
+- Added an !unlink command for Matrix users to unbridge a channel from Matrix ([\#1298](https://github.com/matrix-org/matrix-appservice-irc/issues/1298))
+- Add support for specifying the paste bin limit in room state with the `org.matrix.appservice-irc.config` event type. ([\#1301](https://github.com/matrix-org/matrix-appservice-irc/issues/1301))
+
+
+Bugfixes
+--------
+
+- [M->I]: Trim Markdown code block syntax ([\#1275](https://github.com/matrix-org/matrix-appservice-irc/issues/1275))
+
+
+Internal Changes
+----------------
+
+- Doc changes: Unify use of port 9999, the registration file name, and other minor changes ([\#1274](https://github.com/matrix-org/matrix-appservice-irc/issues/1274))
+- Fixed a bug where our linter would miss several files ([\#1288](https://github.com/matrix-org/matrix-appservice-irc/issues/1288))
+- Fix linter warnings ([\#1289](https://github.com/matrix-org/matrix-appservice-irc/issues/1289))
+- Docker image: Upgrade to NodeJS 14 ([\#1299](https://github.com/matrix-org/matrix-appservice-irc/issues/1299))
+- Add GitHub action to push documentation upon release ([\#1306](https://github.com/matrix-org/matrix-appservice-irc/issues/1306))
+
+
+0.25.0 (2021-03-16)
+====================
+
+No significant changes.
+
+
+0.25.0-rc1 (2021-03-05)
+========================
+
+Bugfixes
+--------
+
+- MXC urls are now properly URL encoded when sent to IRC. ([\#1237](https://github.com/matrix-org/matrix-appservice-irc/issues/1237))
+- Fixed an issue where users would not be rejoined to some channels on reconnect if they failed to rejoin any channel. ([\#1255](https://github.com/matrix-org/matrix-appservice-irc/issues/1255))
+- Fix an issue where IRC membership would not be bridged to new rooms when `botConfig.enabled` is `true`. ([\#1256](https://github.com/matrix-org/matrix-appservice-irc/issues/1256))
+- Update powerlevels immediately when unbridging to avoid rejoining the bridge bot to the room. ([\#1257](https://github.com/matrix-org/matrix-appservice-irc/issues/1257))
+- Fix Docker `start.sh` script to use port `9999` instead of `9995` ([\#1259](https://github.com/matrix-org/matrix-appservice-irc/issues/1259))
+- Fix invalid JSON schema for `ircService.permissions` ([\#1261](https://github.com/matrix-org/matrix-appservice-irc/issues/1261))
+
+
+Improved Documentation
+----------------------
+
+- Add new bridge documentation under /docs. This can be viewed by visiting https://matrix-org.github.io/matrix-appservice-irc/ ([\#1235](https://github.com/matrix-org/matrix-appservice-irc/issues/1235))
+- Add documentation on IRC bridge mode handling. ([\#1251](https://github.com/matrix-org/matrix-appservice-irc/issues/1251))
+
+
+Internal Changes
+----------------
+
+- Leave DM rooms and admin rooms if the Matrix user leaves so that a homeserver may clear them up later. ([\#1258](https://github.com/matrix-org/matrix-appservice-irc/issues/1258))
+- Update to matrix-appservice-bridge 2.6.0-rc1 and use it's implementation of the BridgeInfoStateSyncer ([\#1262](https://github.com/matrix-org/matrix-appservice-irc/issues/1262))
+
+0.24.0 (2021-02-12)
+====================
+
+No significant changes.
+
+
+0.24.0-rc1 (2021-02-02)
+========================
+
+Features
+--------
+
+- Warn Matrix users if they are unable to speak in a channel. ([\#1204](https://github.com/matrix-org/matrix-appservice-irc/issues/1204))
+- Add `!plumb` admin command to bridge rooms ([\#1211](https://github.com/matrix-org/matrix-appservice-irc/issues/1211))
+- Use replies when responding to admin commands. ([\#1215](https://github.com/matrix-org/matrix-appservice-irc/issues/1215))
+- Add `ircClients.realnameFormat` option in the config to show mxid in reverse in the realname field of IRC clients. ([\#1229](https://github.com/matrix-org/matrix-appservice-irc/issues/1229))
+- Add `pingTimeoutMs` and `pingRateMs` as options to the config ([\#1232](https://github.com/matrix-org/matrix-appservice-irc/issues/1232))
+
+
+Bugfixes
+--------
+
+- Fix potential error when using killUser debug endpoint ([\#1206](https://github.com/matrix-org/matrix-appservice-irc/issues/1206))
+- Fix an issue that would cause `!bridgeversion` to report `Unknown` when running inside a Docker container. ([\#1212](https://github.com/matrix-org/matrix-appservice-irc/issues/1212))
+- Fix an issue where the QuitDebouncer would reprocess old QUITs, and process QUITs too early during the debouncing process. ([\#1228](https://github.com/matrix-org/matrix-appservice-irc/issues/1228), [\#1230](https://github.com/matrix-org/matrix-appservice-irc/issues/1230), [\#1231](https://github.com/matrix-org/matrix-appservice-irc/issues/1231))
+
+
+Internal Changes
+----------------
+
+- Update `matrix-appservice-bridge` to `2.5.0-rc1` ([\#1233](https://github.com/matrix-org/matrix-appservice-irc/issues/1233))
+
+
+0.23.0 (2020-12-01)
 ====================
 
 No significant changes.
