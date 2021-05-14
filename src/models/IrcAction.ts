@@ -43,7 +43,7 @@ export class IrcAction {
                 }
 
                 if (matrixAction.htmlText) {
-                    const ircText = ircFormatting.htmlToIrc(matrixAction.htmlText)
+                    const ircText = ircFormatting.htmlToIrc(matrixAction.htmlText, getIrcUser)
                         ?? ircFormatting.markdownCodeToIrc(matrixAction.text)
                         ?? matrixAction.text; // fallback if needed.
                     if (ircText === null) {
