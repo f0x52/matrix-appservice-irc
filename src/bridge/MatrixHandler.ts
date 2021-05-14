@@ -55,7 +55,7 @@ export interface MatrixEventKick {
     event_id: string;
 }
 
-interface MatrixSimpleMessage {
+export interface MatrixSimpleMessage {
     sender: string;
     content: {
         body: string;
